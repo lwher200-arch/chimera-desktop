@@ -84,18 +84,17 @@ async function main() {
 
     const a = new WsClient(API_BASE, { token: TOKEN });
     clients.push(a);
-    const aEvents = [];
-    a.on('event', (e) => aEvents.push(e));
     const aConnect = new Promise((r, j) => { a.on('connect', r); a.on('disconnect', j); });
     // C 应收到 xilan 上线的 presence 广播。
     const presenceOn = waitEvent(c, (e) => e.event === 'presence' && e.data && e.data.account === 'xilan' && e.data.online === true, 15000, 'presence online:true');
     a.start();
     const ac = await withTimeout(aConnect, 20000, 'A hello');
     assert.ok(Number.isFinite(ac.seq), 'hello 应带 seq');
-    const unreadEv = aEvents.find((e) => e.event === 'unread');
-    assert.ok(unreadEv, '登录态 hello 后应收到 unread');
-    const snapEv = aEvents.find((e) => e.event === 'presence' && Array.isArray(e.data && e.data.online));
-    assert.ok(snapEv, '登录态应收到 presence 在线名单快照');
+    // unread 与 presence 快照是 hello 之后紧接着的两帧，不能同步查——
+    // 必须等它们到（hello 处理完时它们可能还在路上）。
+    const unreadEv = await waitEvent(a, (e) => e.event === 'unread', 10000, 'unread 事件');
+    assert.ok(unreadEv.data && typeof unreadEv.data === 'object', 'unread 应带未读对象');
+    const snapEv = await waitEvent(a, (e) => e.event === 'presence' && Array.isArray(e.data && e.data.online), 10000, 'presence 快照');
     assert.ok(snapEv.data.online.some((x) => x.name === 'xilan'), '快照里应有 xilan 自己');
     await presenceOn;
     ok(`A 已连接，seq=${ac.seq}，unread 与 presence 快照齐全，C 见证 xilan 上线`);
