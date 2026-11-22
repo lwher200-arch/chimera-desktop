@@ -30,6 +30,19 @@ npm run dist:linux   # 打 Linux AppImage 到 dist/
 首次打开 → 用论坛账号登录（用户名 + 密码，密码只用于本次换会话，
 不存本地）→ 会话面选群聊。
 
+## 打包
+
+- **Windows 安装包（NSIS，推荐）**：必须在 Windows 机器上构建。
+  双击 `build-windows.bat`（或 `npm install` 后 `npm run dist:win`），
+  产物在 `dist/`（`Chimera 桌面端 Setup 0.1.0.exe`）。
+- **Windows 便携版（zip）**：解压即用，不用安装。
+  `npx electron-builder --win --x64 -c.win.target=zip`，
+  产物 `dist/Chimera 桌面端-0.1.0-win.zip`，解压后运行里面的
+  `Chimera 桌面端.exe`。
+- 注意：Linux 下交叉编译 NSIS 安装包需要 32 位 wine，本仓库的
+  沙箱环境跑不了 32 位 wine，所以 NSIS 包只能在 Windows 上打；
+  zip 可以在 Linux 下打。
+
 ## 节点开关
 
 - 位置：左侧导航“节点”，大开关，开/关一目了然。
