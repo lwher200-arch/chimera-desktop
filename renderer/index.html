@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chimera 桌面端</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app">
+  <header id="topbar">
+    <div class="brand">◐ 奇美拉 <span class="sub">桌面端</span></div>
+    <div class="top-right">
+      <span id="sseDot" class="dot off" title="实时连接状态"></span>
+      <span id="sseText" class="muted">未连接</span>
+      <span id="whoami" class="muted"></span>
+      <button id="logoutBtn" class="btn ghost hidden">退出</button>
+    </div>
+  </header>
+
+  <!-- 登录 -->
+  <section id="view-login" class="view">
+    <div class="login-card">
+      <h1>登录奇美拉</h1>
+      <p class="muted">用论坛账号登录（用户名 + 密码）。密码只用于本次登录换会话，不存本地。</p>
+      <label>用户名 <input id="loginUser" type="text" autocomplete="username" placeholder="coldhao"></label>
+      <label>密码 <input id="loginPass" type="password" autocomplete="current-password" placeholder="密码"></label>
+      <div id="loginErr" class="err"></div>
+      <button id="loginBtn" class="btn primary">登录</button>
+      <p class="muted small">还没有账号？先在论坛网页版注册：forum.coldhao.win</p>
+    </div>
+  </section>
+
+  <!-- 主界面 -->
+  <section id="view-main" class="view hidden">
+    <nav id="sidenav">
+      <button class="nav-btn active" data-view="conv">会话</button>
+      <button class="nav-btn" data-view="posts">帖子</button>
+      <button class="nav-btn" data-view="node">节点 <span id="nodeNavBadge" class="node-badge off">关</span></button>
+    </nav>
+
+    <!-- 会话 -->
+    <div id="pane-conv" class="pane">
+      <aside id="convList">
+        <div class="list-head">
+          <input id="convSearch" type="text" placeholder="搜索群组 / 好友">
+        </div>
+        <div class="tabs">
+          <button id="tabGroups" class="tab active">群聊</button>
+          <button id="tabFriends" class="tab">好友</button>
+        </div>
+        <div id="convItems" class="items"></div>
+      </aside>
+      <main id="chatPane">
+        <div id="chatHead"><b id="chatTitle">选择一个群聊或好友</b><span id="chatMeta" class="muted"></span></div>
+        <div id="chatBox" class="chat-box"></div>
+        <div id="chatPending" class="pending hidden"></div>
+        <div id="chatInputRow" class="input-row hidden">
+          <input id="chatInput" type="text" placeholder="发消息…（粘贴图片可直接发图）" autocomplete="off">
+          <button id="chatImageBtn" class="btn" title="发图片">图片</button>
+          <button id="chatSendBtn" class="btn primary">发送</button>
+        </div>
+      </main>
+    </div>
+
+    <!-- 帖子 -->
+    <div id="pane-posts" class="pane hidden">
+      <div class="posts-wrap">
+        <div class="list-head"><b>最新帖子</b><button id="postsRefresh" class="btn ghost">刷新</button></div>
+        <div id="postsList" class="items"></div>
+      </div>
+    </div>
+
+    <!-- 节点 -->
+    <div id="pane-node" class="pane hidden">
+      <div class="node-wrap">
+        <h2>公网节点 <span class="muted small">漂流节点 · 只读副本档</span></h2>
+        <p class="muted">在你的电脑上跑一个奇美拉轻节点：同步社区副本、对外提供只读查询。
+        随时可以关，关了就干净停掉，不留后台进程。跑一阵、走了也不影响大局。</p>
+        <div class="node-switch-row">
+          <label class="switch">
+            <input type="checkbox" id="nodeToggle">
+            <span class="slider"></span>
+          </label>
+          <div>
+            <b id="nodeStateText">节点已关闭</b>
+            <div id="nodeStateSub" class="muted small">开启后开始同步社区副本</div>
+          </div>
+        </div>
+        <div id="nodeStats" class="node-stats"></div>
+        <div class="node-actions">
+          <button id="nodeSyncBtn" class="btn">立即同步一次</button>
+          <button id="nodeHeadersBtn" class="btn ghost">查看本地副本头</button>
+        </div>
+        <pre id="nodeLog" class="node-log"></pre>
+        <details class="node-note">
+          <summary>这版节点能做什么、不能做什么</summary>
+          <p>能：本地只读副本服务（127.0.0.1:18311）、社区事件头哈希链同步、
+          L2 块高核对（尾网可达时）、peer 缓存、开关持久化。</p>
+          <p>不能（须服务端/网络侧配合）：完整 op-geth + op-node 验证器
+          （需 L1 RPC 授权，授予方式未定；Windows 要走 WSL2）、gossip
+          换 peer、验证/见证升档、互评打分。详见 ARCHITECTURE.md §节点。</p>
+        </details>
+      </div>
+    </div>
+  </section>
+</div>
+<script src="renderer.js"></script>
+</body>
+</html>

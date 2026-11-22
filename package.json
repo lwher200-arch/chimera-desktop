@@ -1,0 +1,57 @@
+{
+  "name": "chimera-desktop",
+  "version": "0.1.0",
+  "description": "奇美拉社区桌面端（终端）：实时会话 / 群聊 / 好友客户端，对接 forum.coldhao.win",
+  "author": "Chimera community",
+  "license": "MIT",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win --x64",
+    "dist:linux": "electron-builder --linux --x64",
+    "test": "node test/smoke.js"
+  },
+  "devDependencies": {
+    "electron": "^37.10.3",
+    "electron-builder": "^26.18.0"
+  },
+  "build": {
+    "appId": "win.coldhao.chimera.desktop",
+    "productName": "Chimera 桌面端",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "lib/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "arch": [
+            "x64"
+          ],
+          "target": "nsis"
+        }
+      ]
+    },
+    "nsis": {
+      "allowToChangeInstallationDirectory": true,
+      "oneClick": false
+    },
+    "linux": {
+      "target": [
+        {
+          "arch": [
+            "x64"
+          ],
+          "target": "AppImage"
+        }
+      ]
+    }
+  }
+}

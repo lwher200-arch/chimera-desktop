@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+# 本地状态与节点数据（绝不提交）
+state.json
+node/
+# 密钥与 token（绝不提交）
+*.key
+*.pem
+jwt.txt
+p2p-priv.txt
+*token*
+*secret*

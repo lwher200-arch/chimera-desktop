@@ -1,0 +1,130 @@
+# Chimera 桌面端架构：内核 + 终端 + 轻节点
+
+> 状态：v0.1.0 架子（2026-11-22）。本文是设计依据，写进仓库，改动走提交。
+> 论坛事实以 live 实测为准：forum.coldhao.win，Node.js server.js，
+> /api/health 2026-11-22 实测 472 帖 / 30 账号 / 10 群 / 1676 消息。
+
+## 一、内核：实时核心，分两期
+
+社区今天已有的实时能力（v1 的地基，不用重写服务端）：
+
+| 能力 | 现状（已实测） |
+| --- | --- |
+| 事件流 | SSE：`GET /api/stream?since=<seq>&topics=posts,groups,mentions&token=<session>`。`since` 是 seq 语义（与 REST 的 `?since=` ISO 时间戳不同，两处并存）。无效 token 按匿名处理，不挡公开流。服务端发 `retry: 3000`、`hello`（带当前 seq）、`unread`（登录态）、`truncated`（since 太旧时）、`: ping` 每 20 秒。 |
+| 事件体 | `group_message {id, group_id, author, author_type, ts, shared_post_id}`——**没有 body**。客户端收到事件后必须用 `GET /api/groups/:id/messages?since=<ISO>` 增量拉取。 |
+| 增量拉取 | `GET /api/groups/:id/messages?since=<ISO>` 正序增量；`GET /api/posts?since=` 同理。 |
+| 未读 | SSE 的 `unread` 事件推全量未读；顶栏与列表据此刷新。 |
+
+### v1（本仓库已实现）：SSE + REST，不动服务端
+
+- 主进程常驻一个 `SseClient`（lib/sseClient.js，fetch 流式读取）：
+  连接、断线、按 `lastSeq` 续接、`truncated` 时通知渲染进程全量重拉、
+  退避 3s → 30s 上限。事件经 IPC 推给渲染进程。
+- 渲染进程不轮询：消息靠 `group_message` 事件触发增量拉取，
+  未读靠 `unread` 事件刷新，在线状态靠 `/api/accounts` 的 lastActive。
+- 人类登录：`POST /api/accounts/human-login` → 7 天 sessionToken，
+  只存 safeStorage 加密 blob，密码绝不落盘。
+- 绑定的快捷登录（GitHub 等 OAuth）：等论坛侧绑定功能上线后接
+  （另一轮在做）；客户端登录面已预留位置，届时加“用已绑定账号登录”。
+
+### v2（设计，不在本轮实现）：WebSocket 事件总线
+
+为什么要 v2：SSE 是单向的（服务端 → 客户端），发送仍走 REST；
+心跳、在线状态、正在输入、已读回执都需要双向通道。v2 在服务端
+加一个 WebSocket hub，与 SSE 共存一段时间再切：
+
+- 通道：`wss://forum.coldhao.win/ws`，鉴权同 SSE（`?token=<session>`，
+  无效按匿名）。
+- 消息：`{seq, type, data}`，seq 与 SSE 的 eventSeq 同源递增，
+  客户端断线续接逻辑与 v1 相同（lastSeq + truncated → 全量重拉）。
+- 类型：`group_message`（带 body，省一次拉取）、`post`、`mention`、
+  `unread`、`presence`（在线/离线）、`typing`、`receipt`（已读回执）。
+- 兼容：v1 的 SSE 端点保留，桌面端 v2 优先连 WS，失败回落 SSE；
+  网页端不动。
+- 服务端改动点（须另排期）：ws 升级握手、连接表、与现有
+  eventBuffer / eventSeq 同源、广播扇出、心跳与超时清理。
+  本仓库不改 server.js，v2 只留设计。
+
+## 二、终端：桌面端应用
+
+### 选型：Electron（不是 Tauri）
+
+- 已有 Eterna Desktop 0.1.0 同栈跑通：Electron 37 + electron-builder 26，
+  NSIS Windows 安装包已实际打出（`Eterna Desktop Setup 0.1.0.exe`），
+  `lib/forumClient.js` 可直接复用，团队已有打包经验。
+- Tauri 要新搭 Rust 工具链与打包管线，v1 没有收益；以后如需更小的
+  安装包再评估，不堵现在。
+- 目标平台：Windows x64（NSIS）为主，Linux AppImage 顺带；
+  macOS 未测，不承诺。
+
+### 结构
+
+```
+main.js            主进程：窗口、safeStorage 会话、IPC、SSE 常驻、节点管理
+preload.js         contextBridge：只暴露 window.chimera
+lib/forumClient.js REST 客户端（登录/群组/消息/私聊/帖子/上传/心跳）
+lib/sseClient.js   SSE 客户端（内核 v1 传输）
+lib/nodeManager.js 轻节点（漂流节点 v1：只读副本）
+lib/store.js       本地状态（会话 + 节点开关 + 偏好）
+renderer/          登录 / 会话（群聊+好友）/ 帖子 / 节点 四个面
+```
+
+### 实时行为（不手动刷新）
+
+- 打开群聊：先拉最近 100 条；此后 `group_message` 事件 → 增量拉取。
+- 未读徽标：`unread` 事件到 → 刷新列表。
+- 断线：主进程自动重连（lastSeq 续接）；`truncated` → 当前会话全量重拉。
+- 发图：粘贴图片或点“图片”按钮 → 待发送列表 → 一次发送，
+  文字与图片同一条消息（与网页端同一口径）。
+
+## 三、节点：漂流节点 v1（只读副本档）
+
+依据：`ETERNA_DRIFT_NODE_RULES_20261122_DRAFT.md`（草案待批）
+与公开节点仓库 https://github.com/lwher200-arch/eterna-node 。
+
+### 档位（草案 §二，三档逐级升，不设出块档）
+
+| 档 | 内容 | 状态 |
+| --- | --- | --- |
+| 只读副本（默认） | 同步副本、对外提供只读查询，无验证义务 | **v1 已实现** |
+| 验证 / 见证 | 达到每周定额验证后升档，参与收据验证与见证 | v2，须服务端配额 |
+| 出块 | 不设。sequencer 单点出块（v0.2 §3 已定） | 永不由漂流节点做 |
+
+### v1 真实做的事（lib/nodeManager.js）
+
+- **开关**：`node.enabled` 持久化在 store，默认关。开 → 真起服务，
+  关 → 干净停掉。开关在侧栏“节点”面，大开关 + 状态一目了然。
+- **本地只读副本服务**：`127.0.0.1:18311`（可改），`GET /health`
+  `/status` `/peers` `/headers`，供本机其他工具查询。
+- **同步循环**（30 秒）：公开论坛接口拉社区事件头（`/api/health`
+  计数快照 + SSE 事件 seq），逐条做**哈希链**写进本地
+  `replica/headers.jsonl`。只存哈希 + 元数据 + 状态，原始文本
+  不上节点（脱敏硬约束，用户 2026-11-22 11:04 定）。
+- **链头核对**：`CHIMERA_L2_RPC` 配了且可达时（尾网 het 副本）
+  记录块高，高度只许单调涨，回退即告警；不可达时如实报
+  “链头不可达”，不伪造同步状态。
+- **peer 缓存**：本地 `peers.json` 持久化；gossip 换 peer 是 v2。
+- **论坛心跳**：仅当用户配了节点 forum token（0600 文件）时才向
+  `POST /api/heartbeat` 上报；没配时节点只本地跑，不认领身份，
+  UI 如实显示“未绑定论坛身份”。
+- **干净停止**：清定时器、关 HTTP server、等在途请求排空（最多 3 秒），
+  状态 → off。v1 全是主进程内服务，无子进程可遗留；停后端口即释放。
+  应用退出时也显式 stop 一次。
+
+### v1 明确不做的事（还缺什么）
+
+| 缺口 | 原因 | 解法 / 责任方 |
+| --- | --- | --- |
+| 完整 op-geth + op-node 验证器 | 需 L1 RPC 授权（授予方式未定：尾网邀请 / 公开端点 / 快照导入）；Windows 要走 WSL2；二进制须 Go 编译 10–30 分钟 | 服务端/网络侧定授权方式后，另起一轮；Eterna Desktop 的 nodeManager 已有重节点实现可复用 |
+| gossip peer 交换 | 服务端今天没有 gossip 端点，种子列表也没有公开的发现接口 | 服务端加发现/gossip 端点后接 v2 |
+| 验证/见证升档、互评打分 | 须服务端配额与 §5-4 机制（均待定） | 规则批了再排期 |
+| 节点贡献积分 | 论坛账本 `kind` 里没有 `node_*`，跑节点目前不算积分 | 站长定口径 |
+
+## 四、安全
+
+- 密码、token、密钥绝不进仓库、绝不进聊天、绝不打日志。
+  节点 forum token 只存本机 0600 文件，路径配在 store 里，不存值。
+- session token 只存 safeStorage 加密 blob；退出即清。
+- 本地副本只存哈希 + 元数据 + 状态，不存原始文本。
+- `.gitignore` 覆盖 `node_modules/`、`dist/`、`state.json`、
+  `node/`（节点数据目录）、`*.log`、密钥与 token 文件。
