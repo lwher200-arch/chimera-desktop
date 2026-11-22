@@ -16,6 +16,8 @@ const crypto = require('node:crypto');
 
 const { ForumClient } = require('../lib/forumClient');
 const { SseClient } = require('../lib/sseClient');
+const { WsClient } = require('../lib/wsClient');
+const { RealtimeClient } = require('../lib/realtimeClient');
 const { NodeManager } = require('../lib/nodeManager');
 const { Store } = require('../lib/store');
 
@@ -129,6 +131,94 @@ async function main() {
   } finally {
     seed.close();
     fs.rmSync(tmp, { recursive: true, force: true });
+  }
+
+  console.log('== 4. live WS（内核 v2，匿名，不写线上状态）==');
+  // 4a. WS hello：匿名连 wss，应收到带 seq 的 hello。
+  {
+    const ws = new WsClient(API_BASE, {});
+    const c = await withTimeout(new Promise((resolve, reject) => {
+      ws.on('connect', resolve);
+      ws.on('disconnect', reject);
+      ws.start();
+    }), 20000, 'WS hello');
+    assert.ok(Number.isFinite(ws.lastSeq), 'hello 后 lastSeq 应为有限 seq');
+    assert.strictEqual(ws.everConnected, true);
+    ws.stop();
+    ok(`WS hello 收到，seq=${c.seq}`);
+  }
+  // 4b. truncated：since=0 远早于缓冲，服务端应先发 truncated。
+  {
+    const ws = new WsClient(API_BASE, { since: 0 });
+    const data = await withTimeout(new Promise((resolve, reject) => {
+      ws.on('truncated', resolve);
+      ws.on('disconnect', reject);
+      ws.start();
+    }), 20000, 'WS truncated');
+    assert.strictEqual(data.truncated, true, 'truncated 事件应带 truncated:true');
+    assert.ok(Number.isFinite(data.seq), 'truncated 应带最新 seq');
+    ws.stop();
+    ok(`WS truncated 收到，latest seq=${data.seq}`);
+  }
+  // 4c. 断线续接：主动断开后应按 lastSeq 自动重连，不丢连接。
+  {
+    const ws = new WsClient(API_BASE, {});
+    let connects = 0;
+    const second = new Promise((resolve, reject) => {
+      ws.on('connect', () => {
+        connects += 1;
+        if (connects === 2) resolve(ws.lastSeq);
+      });
+      ws.on('disconnect', () => { /* 重连中，忽略 */ });
+      ws.start();
+    });
+    await withTimeout(new Promise((resolve, reject) => {
+      ws.on('connect', () => resolve());
+      setTimeout(() => reject(new Error('首次 hello 未到')), 20000);
+    }), 20000, 'WS 首次 hello');
+    const seq1 = ws.lastSeq;
+    assert.ok(Number.isFinite(seq1));
+    ws.dropConnection();
+    const seq2 = await withTimeout(second, 25000, 'WS 断线重连');
+    assert.ok(Number.isFinite(seq2) && seq2 >= seq1, '重连后 seq 不应倒退');
+    ws.stop();
+    ok(`WS 断线重连成功，seq ${seq1} -> ${seq2}`);
+  }
+  // 4d. WS 优先：RealtimeClient 正常应走 ws。
+  {
+    const rt = new RealtimeClient(API_BASE, {});
+    const c = await withTimeout(new Promise((resolve, reject) => {
+      rt.on('connect', resolve);
+      rt.on('disconnect', reject);
+      rt.start();
+    }), 20000, 'Realtime WS connect');
+    assert.strictEqual(c.transport, 'ws', '正常应优先走 WS');
+    assert.strictEqual(rt.transport, 'ws');
+    rt.stop();
+    ok(`RealtimeClient 优先走 WS，seq=${c.seq}`);
+  }
+  // 4e. WS 挂掉 → SSE 回落：WS 指到不通的本地端口，应切 SSE 并收到 hello。
+  {
+    const rt = new RealtimeClient(API_BASE, { wsUrl: 'wss://127.0.0.1:9/ws' });
+    const fellBack = new Promise((resolve) => rt.on('fallback', resolve));
+    const connected = new Promise((resolve, reject) => {
+      rt.on('connect', resolve);
+      rt.on('disconnect', () => { /* 回落前的 WS 断开，忽略 */ });
+    });
+    // hello 监听必须在 start() 之前挂上：SSE hello 紧跟 connect 后面到，
+    // 晚挂会漏掉（connect 只表示 HTTP 通了，hello 是流里第一条事件）。
+    const helloP = new Promise((resolve) => {
+      rt.on('event', (e) => { if (e.event === 'hello') resolve(e); });
+    });
+    rt.start();
+    const fb = await withTimeout(fellBack, 20000, 'WS->SSE 回落信号');
+    assert.strictEqual(fb.to, 'sse');
+    const c = await withTimeout(connected, 20000, '回落 SSE connect');
+    assert.strictEqual(c.transport, 'sse', 'WS 挂掉后应走 SSE');
+    const helloEv = await withTimeout(helloP, 20000, '回落 SSE hello');
+    assert.ok(Number.isFinite(helloEv.seq), '回落 SSE hello 应带 seq');
+    rt.stop();
+    ok(`WS 挂掉后回落 SSE，hello seq=${helloEv.seq}`);
   }
 
   console.log(`\nPASS: ${passed} 项全过`);

@@ -32,6 +32,12 @@ contextBridge.exposeInMainWorld('chimera', {
     syncNow: () => ipcRenderer.invoke('node:sync-now'),
     headers: (limit) => ipcRenderer.invoke('node:headers', limit),
   },
+  // 实时（WS 优先）：typing / receipt 走 WS 通道；SSE 回落时返回 false，
+  // 调用方仍可走 REST。渲染进程暂未调用，供后续接线用。
+  realtime: {
+    sendTyping: (groupId) => ipcRenderer.invoke('realtime:typing', { groupId }),
+    sendReceipt: (opts) => ipcRenderer.invoke('realtime:receipt', opts || {}),
+  },
   onSseEvent: (fn) => ipcRenderer.on('sse:event', (_e, payload) => fn(payload)),
   onSseConnect: (fn) => ipcRenderer.on('sse:connect', (_e, payload) => fn(payload)),
   onSseDisconnect: (fn) => ipcRenderer.on('sse:disconnect', (_e, payload) => fn(payload)),

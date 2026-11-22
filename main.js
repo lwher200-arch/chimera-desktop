@@ -4,8 +4,10 @@
  *
  * 职责：
  *  - 窗口与会话：safeStorage 存 session token（7 天），密码绝不落盘。
- *  - 实时内核 v1：SseClient 常驻主进程，事件经 IPC 推给渲染进程；
- *    断线按 lastSeq 续接，truncated 时通知渲染进程全量重拉。
+ *  - 实时内核 v2：RealtimeClient 常驻主进程（WS 优先，WS 不可用时回落 SSE），
+ *    事件经 IPC 推给渲染进程；断线按 lastSeq 续接，truncated 时通知渲染进程
+ *    全量重拉。WS 的 group_message 带 body（渲染进程暂仍走增量拉取，body
+ *    已随事件透传，供后续增量渲染直接用）。
  *  - 轻节点：NodeManager（lib/nodeManager.js），开关持久化在 store；
  *    启动时若 node.enabled 为真则自动起节点（用户上次的选择）。
  *
@@ -15,7 +17,7 @@ const path = require('path');
 const { app, BrowserWindow, ipcMain, safeStorage } = require('electron');
 const { Store } = require('./lib/store');
 const { ForumClient } = require('./lib/forumClient');
-const { SseClient } = require('./lib/sseClient');
+const { RealtimeClient } = require('./lib/realtimeClient');
 const { NodeManager } = require('./lib/nodeManager');
 
 const API_BASE = process.env.CHIMERA_API_BASE || 'https://forum.coldhao.win';
@@ -23,7 +25,7 @@ const API_BASE = process.env.CHIMERA_API_BASE || 'https://forum.coldhao.win';
 let win = null;
 let store = null;
 let client = null;
-let sse = null;
+let realtime = null;
 let nodeManager = null;
 
 function userDataFile(name) {
@@ -78,19 +80,24 @@ function sendToRenderer(channel, payload) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
 }
 
-// ---- SSE: kernel v1, main process owns the connection ----
-function startSse() {
-  stopSse();
-  sse = new SseClient(API_BASE, { token: sessionToken() });
-  sse.on('connect', () => sendToRenderer('sse:connect', { at: new Date().toISOString() }));
-  sse.on('disconnect', (err) => sendToRenderer('sse:disconnect', { error: String(err && err.message || err) }));
-  sse.on('truncated', (data) => sendToRenderer('sse:truncated', data));
-  sse.on('event', ({ event, data, seq }) => sendToRenderer('sse:event', { event, data, seq }));
-  sse.start();
+// ---- realtime: kernel v2, WS-first + SSE fallback; main process owns it ----
+// IPC 通道名保持 sse:* 不变，渲染进程不用改；connect payload 多带 transport
+//（'ws' | 'sse'），渲染进程忽略多余字段。
+function startRealtime() {
+  stopRealtime();
+  realtime = new RealtimeClient(API_BASE, { token: sessionToken() });
+  realtime.on('connect', ({ transport }) => {
+    console.log('[realtime] transport:', transport);
+    sendToRenderer('sse:connect', { at: new Date().toISOString(), transport });
+  });
+  realtime.on('disconnect', (err) => sendToRenderer('sse:disconnect', { error: String(err && err.message || err) }));
+  realtime.on('truncated', (data) => sendToRenderer('sse:truncated', data));
+  realtime.on('event', ({ event, data, seq }) => sendToRenderer('sse:event', { event, data, seq }));
+  realtime.start();
 }
 
-function stopSse() {
-  if (sse) { try { sse.stop(); } catch {} sse = null; }
+function stopRealtime() {
+  if (realtime) { try { realtime.stop(); } catch {} realtime = null; }
 }
 
 // ---- light node: switch is persisted; auto-start on launch if enabled ----
@@ -136,7 +143,7 @@ function registerIpc() {
         expiresAt: Date.now() + 7 * 24 * 3600 * 1000,
       };
     });
-    startSse();
+    startRealtime();
     return { username: data.username || username };
   });
 
@@ -144,7 +151,7 @@ function registerIpc() {
     const token = sessionToken();
     if (token) { try { await client.humanLogout(token); } catch {} }
     store.update((s) => { s.session = null; });
-    startSse(); // 退回匿名流
+    startRealtime(); // 退回匿名流
     return true;
   });
 
@@ -178,6 +185,14 @@ function registerIpc() {
     }
   });
 
+  // ---- realtime IPC: typing / receipt 走 WS（SSE 路上返回 false，仍可走 REST） ----
+  ipcMain.handle('realtime:typing', (_e, { groupId }) => realtime ? realtime.sendTyping(groupId) : false);
+  ipcMain.handle('realtime:receipt', (_e, { groupId, seq, scope }) => {
+    if (!realtime) return false;
+    if (scope === 'mentions') return realtime.sendReceiptMentions(seq);
+    return realtime.sendReceipt(groupId, seq);
+  });
+
   // ---- node IPC: switch + status + log ----
   ipcMain.handle('node:status', () => (nodeManager ? nodeManager.status() : { state: 'off', enabled: false }));
   ipcMain.handle('node:set-enabled', async (_e, enabled) => {
@@ -194,7 +209,7 @@ app.whenReady().then(async () => {
   client = new ForumClient(API_BASE);
   createWindow();
   registerIpc();
-  startSse();
+  startRealtime();
   await initNode();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
