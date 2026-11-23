@@ -1,8 +1,17 @@
 'use strict';
 /* renderer.js — Chimera 桌面端渲染进程。
- * 实时规则：消息靠 SSE 事件驱动增量拉取（group_message 事件本身不带
- * body，收到后用 ?since= 上次时间戳拉新消息）；未读数靠 SSE 的 unread
- * 事件刷新；不断线重连靠主进程的 SseClient（lastSeq 续接）。不轮询。 */
+ * 实时规则（v0.2.1 性能优化后）：
+ *  - 新消息增量追加：WS 直播 group_message 自带 body，直接把这一条 append
+ *    进当前打开的群聊；无 body 的（断线补发 / SSE 路）用 ?since=lastTs 只拉
+ *    新消息追加；不再每条消息全量重拉 100 条 + 全量 innerHTML 重渲染。
+ *  - 未读徽章：unread 事件 / receipt ack 带全量计数时校准；其他群的新消息
+ *    本地 +1；打开群聊时发 receipt 清掉该群未读。
+ *  - loadAll 只在登录 / 启动时跑，实时事件不再触发它（原来每事件约 390ms、
+ *    3 个 HTTP 请求；现在事件只改自己那一项）。
+ *  - 图片转 base64 分块做（32KB 一块），不再用展开运算符一次传整个文件，
+ *    120KB 以上图片不再 RangeError；失败时弹提示，不再静默丢掉。
+ * 断线重连靠主进程的 RealtimeClient（WS 优先、SSE 回落，lastSeq 续接）。
+ * 不轮询（节点面板 5 秒定时器已删，节点状态由 node:state / node:sync 事件推）。 */
 const $ = (id) => document.getElementById(id);
 
 const state = {
@@ -13,6 +22,9 @@ const state = {
   tab: 'groups',
   open: null, // { kind: 'group'|'dm', id, name }
   lastTs: null,
+  lastSeq: null, // 最近一个实时事件的 seq（发 receipt 清未读用）
+  renderedIds: new Set(), // 当前打开会话已渲染的消息 id（增量去重）
+  unread: {}, // gid -> 未读数（本地维护，unread 事件 / receipt ack 校准）
   pending: [], // { name, base64 } 待发送图片
   nodeStatus: null,
 };
@@ -135,6 +147,44 @@ function renderConvList() {
   box.querySelectorAll('.item').forEach((el) => {
     el.addEventListener('click', () => openConv(el.dataset.kind, el.dataset.id));
   });
+  paintUnreadBadges();
+}
+
+// ---------- unread badges ----------
+// 服务端 unread 事件 / receipt ack 的口径：{ groups: { gid: n }, total, mentions }。
+// 全量到达时校准本地计数；其他群的新消息只本地 +1（下次全量到达再校准）。
+function paintUnreadBadges() {
+  document.querySelectorAll('[data-unread]').forEach((el) => {
+    const n = Number(state.unread[el.dataset.unread] || 0);
+    el.textContent = n > 0 ? (n > 99 ? '99+' : String(n)) : '';
+  });
+}
+
+function applyUnread(unread) {
+  if (!unread || typeof unread !== 'object') return;
+  state.unread = { ...(unread.groups || {}) };
+  paintUnreadBadges();
+}
+
+function bumpUnread(gid, delta) {
+  const n = Math.max(0, Number(state.unread[gid] || 0) + delta);
+  state.unread[gid] = n;
+  paintUnreadBadges();
+}
+
+// 打开群聊即清未读：WS 路走 receipt（回 ack 带全量 unread），SSE 回落时
+// sendReceipt 返回 false，改走 REST POST /api/read。失败不挡阅读。
+async function markGroupRead(gid) {
+  if (!Number.isFinite(state.lastSeq)) return;
+  const seq = state.lastSeq;
+  if (state.unread[gid]) { state.unread[gid] = 0; paintUnreadBadges(); }
+  try {
+    const viaWs = await window.chimera.realtime.sendReceipt({ groupId: gid, seq });
+    if (viaWs === false) {
+      const r = await window.chimera.api.read(gid, seq);
+      if (r && r.unread) applyUnread(r.unread);
+    }
+  } catch { /* 已读上报失败不挡阅读；下次 unread 事件校准 */ }
 }
 
 async function openConv(kind, id) {
@@ -143,11 +193,13 @@ async function openConv(kind, id) {
     : id;
   state.open = { kind, id, name };
   state.lastTs = null;
+  state.renderedIds = new Set();
   $('chatTitle').textContent = name;
   $('chatMeta').textContent = kind === 'group' ? '群聊' : '私聊';
   $('chatInputRow').classList.remove('hidden');
   $('chatBox').innerHTML = '<div class="muted">加载中…</div>';
   await loadMessages();
+  if (kind === 'group') markGroupRead(id);
 }
 
 async function loadMessages() {
@@ -166,17 +218,73 @@ async function loadMessages() {
   }
 }
 
+// 只拉上次时间戳之后的新消息（服务端 ?since= 按 ts > 过滤），追加进当前视图。
+// fullFallback 为真且一无所获时全量重拉一次（防两条消息 ts 撞到同一毫秒被漏掉）。
+async function fetchNewMessages(fullFallback) {
+  if (!state.open) return false;
+  try {
+    let data;
+    if (state.open.kind === 'group') {
+      data = await window.chimera.api.groupMessages(state.open.id, { since: state.lastTs || undefined });
+    } else {
+      data = await window.chimera.api.dmHistory(state.open.id, { since: state.lastTs || undefined });
+    }
+    const msgs = data.messages || data || [];
+    if (!msgs.length) {
+      if (fullFallback) await loadMessages();
+      return false;
+    }
+    appendMessages(msgs);
+    return true;
+  } catch (err) {
+    if (fullFallback) { try { await loadMessages(); } catch { /* 全量重拉也失败就等下次事件 */ } }
+    return false;
+  }
+}
+
+function messageHtml(m) {
+  const atts = (m.attachments || []).map((a) =>
+    `<a href="${esc(a.url)}" target="_blank"><img class="thumb" src="${esc(a.url)}" alt="图片"></a>`).join('');
+  return `<div class="msg"><b>${esc(m.author || m.from || '?')}</b>
+    <span class="muted small">${esc(m.ts || '')}</span>
+    <div>${esc(m.body || '')}</div>${atts}</div>`;
+}
+
 function renderMessages(msgs) {
   const box = $('chatBox');
-  box.innerHTML = msgs.map((m) => {
-    const atts = (m.attachments || []).map((a) =>
-      `<a href="${esc(a.url)}" target="_blank"><img class="thumb" src="${esc(a.url)}" alt="图片"></a>`).join('');
-    return `<div class="msg"><b>${esc(m.author || m.from || '?')}</b>
-      <span class="muted small">${esc(m.ts || '')}</span>
-      <div>${esc(m.body || '')}</div>${atts}</div>`;
-  }).join('') || '<div class="muted">暂无消息</div>';
+  box.innerHTML = msgs.map((m) => messageHtml(m)).join('') || '<div class="muted" data-empty="1">暂无消息</div>';
+  state.renderedIds = new Set(msgs.map((m) => m.id).filter(Boolean));
   box.scrollTop = box.scrollHeight;
   if (msgs.length) state.lastTs = msgs[msgs.length - 1].ts;
+}
+
+// 增量追加：按 id 去重（自己发的消息回声事件与发送后拉取可能撞上同一条）。
+function appendMessages(msgs) {
+  const box = $('chatBox');
+  const empty = box.querySelector('[data-empty]');
+  if (empty) empty.remove();
+  let added = false;
+  for (const m of msgs) {
+    const id = m.id;
+    if (id && state.renderedIds.has(id)) continue;
+    if (id) state.renderedIds.add(id);
+    box.insertAdjacentHTML('beforeend', messageHtml(m));
+    if (m.ts) state.lastTs = m.ts; // 消息按时间正序，最后一条即最新水位
+    added = true;
+  }
+  if (added) box.scrollTop = box.scrollHeight;
+}
+
+// WS 直播事件自带 body/attachments（服务端 wsExtra），直接拼成消息对象追加。
+function messageFromEvent(data) {
+  return {
+    id: data.id,
+    author: data.author,
+    author_type: data.author_type,
+    ts: data.ts,
+    body: data.body || '',
+    attachments: Array.isArray(data.attachments) ? data.attachments : [],
+  };
 }
 
 // ---------- send (text + images in one message) ----------
@@ -191,9 +299,21 @@ function renderPending() {
   });
 }
 
+// 分块转 base64：32KB 一块，避开 btoa(String.fromCharCode(...bytes))
+// 一次展开整个文件会撞 V8 参数上限（120KB 以上图片直接 RangeError）。
+function arrayBufferToBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  const CHUNK = 0x8000;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+
 async function fileToPending(file) {
   const buf = await file.arrayBuffer();
-  const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+  const b64 = arrayBufferToBase64(buf);
   state.pending.push({ name: file.name, base64: b64 });
   renderPending();
 }
@@ -203,7 +323,11 @@ $('chatImageBtn').addEventListener('click', () => {
   input.type = 'file';
   input.accept = 'image/*';
   input.multiple = true;
-  input.onchange = () => { [...input.files].forEach(fileToPending); };
+  input.onchange = () => {
+    [...input.files].forEach((f) => {
+      fileToPending(f).catch((err) => alert('图片读取失败：' + (err.message || err)));
+    });
+  };
   input.click();
 });
 
@@ -211,7 +335,10 @@ $('chatInput').addEventListener('paste', async (e) => {
   const files = [...(e.clipboardData?.files || [])].filter((f) => f.type.startsWith('image/'));
   if (!files.length) return;
   e.preventDefault();
-  for (const f of files) await fileToPending(f);
+  for (const f of files) {
+    try { await fileToPending(f); }
+    catch (err) { alert('图片读取失败：' + (err.message || err)); return; }
+  }
 });
 
 async function sendCurrent() {
@@ -237,7 +364,8 @@ async function sendCurrent() {
     $('chatInput').value = '';
     state.pending = [];
     renderPending();
-    await loadMessages();
+    // 自己发的消息：增量拉一次即可（回声事件到时按 id 去重，不会 double）。
+    await fetchNewMessages(false);
   } catch (err) {
     alert('发送失败：' + (err.message || err));
   }
@@ -321,19 +449,37 @@ $('nodeHeadersBtn').addEventListener('click', async () => {
 });
 
 // ---------- SSE wiring (main process owns the connection) ----------
+// 事件只改自己那一项，不再全量 loadAll（原来每事件约 390ms、3 个 HTTP 请求）。
 window.chimera.onSseConnect(() => setSse(true));
 window.chimera.onSseDisconnect(() => setSse(false, '已断开，自动重连中…'));
 window.chimera.onSseTruncated(() => { if (state.open) loadMessages(); });
-window.chimera.onSseEvent(async ({ event, data }) => {
-  if (event === 'unread') { await loadAll(); return; }
-  if (event === 'group_message' && state.open?.kind === 'group' && data?.group_id === state.open.id) {
-    await loadMessages(); // 事件不带 body，增量拉取
+window.chimera.onSseEvent(async ({ event, data, seq }) => {
+  if (Number.isFinite(seq)) state.lastSeq = seq;
+  if (event === 'unread') { applyUnread(data); return; }
+  if (event === 'receipt') { if (data && data.unread) applyUnread(data.unread); return; }
+  if (event === 'group_message') {
+    if (state.open?.kind === 'group' && data?.group_id === state.open.id) {
+      if (data && data.body !== undefined && data.body !== null) {
+        appendMessages([messageFromEvent(data)]); // WS 直播自带 body，直接追加
+      } else {
+        await fetchNewMessages(true); // 断线补发 / SSE 路无 body：增量拉取
+      }
+      markGroupRead(state.open.id); // 正看着这个群，顺手清未读
+      return;
+    }
+    if (data?.group_id) bumpUnread(data.group_id, 1); // 别的群：徽章本地 +1
     return;
   }
-  if (event === 'post' || event === 'group_message' || event === 'mention') {
-    // 非当前打开的会话：只刷新列表里的未读（不打断正在看的内容）
-    await loadAll();
+  if (event === 'post_created' || event === 'reply_created') {
+    if (!$('pane-posts').classList.contains('hidden')) loadPosts();
+    return;
   }
+  if (event === 'mention') {
+    // 私聊没有专属事件；打开着私聊时顺带增量拉一次，别的不动。
+    if (state.open?.kind === 'dm') await fetchNewMessages(false);
+    return;
+  }
+  // presence / typing / pong 等临时消息：不刷新列表、不打扰阅读。
 });
 window.chimera.onNodeState(() => refreshNodePanel());
 window.chimera.onNodeSync(() => refreshNodePanel());
@@ -342,7 +488,5 @@ window.chimera.onNodeLog((line) => {
   log.textContent += line + '\n';
   log.scrollTop = log.scrollHeight;
 });
-
-setInterval(() => { if (!$('pane-node').classList.contains('hidden')) refreshNodePanel(); }, 5000);
 
 boot();

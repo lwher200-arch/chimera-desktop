@@ -23,6 +23,7 @@ contextBridge.exposeInMainWorld('chimera', {
     dmHistory: (peer, opts) => ipcRenderer.invoke('api:dm-history', { peer, ...(opts || {}) }),
     sendDm: (peer, body, attachments) => ipcRenderer.invoke('api:send-dm', { peer, body, attachments }),
     posts: (opts) => ipcRenderer.invoke('api:posts', opts || {}),
+    read: (groupId, seq) => ipcRenderer.invoke('api:read', { groupId, seq }),
     upload: (filePath) => ipcRenderer.invoke('api:upload', { filePath }),
     uploadBlob: (name, base64) => ipcRenderer.invoke('api:upload-blob', { name, base64 }),
   },

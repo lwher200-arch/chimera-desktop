@@ -17,6 +17,7 @@
     "electron-builder": "^26.18.0"
   },
   "build": {
+    "electronLanguages": ["en", "zh-CN"],
     "appId": "win.coldhao.chimera.desktop",
     "productName": "Chimera 桌面端",
     "directories": {

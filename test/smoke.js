@@ -221,6 +221,97 @@ async function main() {
     ok(`WS 挂掉后回落 SSE，hello seq=${helloEv.seq}`);
   }
 
+  console.log('== 5. 性能优化（v0.2.1）：分块 base64 + 副本头轮转 ==');
+  // §3 的 mock 种子已关，这里另起一个供 5b/5c 用。
+  const seed5 = await startMockSeed();
+  const seed5Url = `http://127.0.0.1:${seed5.address().port}`;
+  // 5a. 分块 base64：直接测 renderer.js 里实际发布的函数（从源码抽出来跑，
+  // 不是复制一份）。5MB 随机 buffer 应与 Buffer.toString('base64') 逐字节一致；
+  // 旧的展开写法在 200KB 就应抛 RangeError（回归锚点，证明修的是真 bug）。
+  {
+    const rendererSrc = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'renderer.js'), 'utf8');
+    const m = rendererSrc.match(/function arrayBufferToBase64\(buf\) \{[\s\S]*?\n\}/);
+    assert.ok(m, 'renderer.js 应包含 arrayBufferToBase64');
+    const arrayBufferToBase64 = new Function(`${m[0]}; return arrayBufferToBase64;`)();
+    assert.strictEqual(arrayBufferToBase64(new ArrayBuffer(0)), '');
+    const small = crypto.randomBytes(3 * 1024);
+    assert.strictEqual(arrayBufferToBase64(small.buffer), small.toString('base64'), '3KB 应与 Buffer 口径一致');
+    const big = crypto.randomBytes(5 * 1024 * 1024);
+    const t0 = Date.now();
+    const b64 = arrayBufferToBase64(big.buffer);
+    const ms = Date.now() - t0;
+    assert.strictEqual(b64, big.toString('base64'), '5MB 分块 base64 应与 Buffer 口径逐字节一致');
+    assert.ok(Buffer.from(b64, 'base64').equals(big), '5MB base64 往返应无损');
+    assert.throws(() => {
+      const b = new Uint8Array(200 * 1024);
+      btoa(String.fromCharCode(...b));
+    }, RangeError, '旧展开写法在 200KB 应抛 RangeError');
+    ok(`分块 base64：5MB 往返一致（${ms}ms），旧写法 200KB 确认抛 RangeError`);
+  }
+  // 5b. 副本头轮转：上限 5 行 + slack 0，写 8 条后文件只剩最新 5 行，链不断。
+  {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'chimera-node-rot-'));
+    try {
+      const nm = new NodeManager({
+        nodeDir: path.join(tmp, 'node'),
+        apiBase: seed5Url,
+        config: { enabled: false, port: 0, seeds: [seed5Url] },
+        maxHeadersLines: 5,
+        rotateSlackLines: 0,
+        onLog: () => {},
+      });
+      await nm.start();
+      for (let i = 0; i < 7; i++) await nm.syncOnce();
+      assert.strictEqual(nm.headersCount, 5, '轮转后计数应为上限 5');
+      const lines = fs.readFileSync(path.join(tmp, 'node', 'replica', 'headers.jsonl'), 'utf8')
+        .split('\n').filter(Boolean).map((l) => JSON.parse(l));
+      assert.strictEqual(lines.length, 5, '文件应只剩最新 5 行');
+      for (let i = 1; i < lines.length; i++) {
+        assert.strictEqual(lines[i].prevHash, lines[i - 1].hash, `第 ${i} 行 prevHash 应接上一行 hash`);
+      }
+      assert.strictEqual(nm._prevHash, lines[lines.length - 1].hash, '_prevHash 应为尾行 hash');
+      ok('副本头轮转：8 条 → 只留最新 5 行，链内 prevHash 逐行衔接');
+      await nm.stop();
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+  // 5c. _loadHead 有界读：预填 10000 行合法链，构造即读一次、只解析尾行。
+  {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'chimera-node-head-'));
+    try {
+      const dir = path.join(tmp, 'node', 'replica');
+      fs.mkdirSync(dir, { recursive: true });
+      const canonical = (o) => JSON.stringify(o, Object.keys(o).sort());
+      let prev = '0'.repeat(64);
+      const out = [];
+      for (let i = 0; i < 10000; i++) {
+        const body = { kind: 'community-head', ts: new Date().toISOString(), posts: i, prevHash: prev };
+        const hash = crypto.createHash('sha256').update(canonical(body), 'utf8').digest('hex');
+        out.push(JSON.stringify({ ...body, hash }));
+        prev = hash;
+      }
+      fs.writeFileSync(path.join(dir, 'headers.jsonl'), out.join('\n') + '\n');
+      const t0 = Date.now();
+      const nm = new NodeManager({
+        nodeDir: path.join(tmp, 'node'),
+        apiBase: seed5Url,
+        config: { enabled: false, port: 0, seeds: [seed5Url] },
+        onLog: () => {},
+      });
+      const ms = Date.now() - t0;
+      assert.strictEqual(nm.headersCount, 10000, '预填 10000 行应数出 10000');
+      assert.strictEqual(nm._prevHash, prev, '_prevHash 应为尾行 hash');
+      assert.ok(ms < 1000, `10000 行 _loadHead 应在 1 秒内，实际 ${ms}ms`);
+      assert.strictEqual(nm._tailHeaders(3).length, 3, '_tailHeaders(3) 应只回最后 3 行');
+      assert.strictEqual(nm._tailHeaders(3)[2].hash, prev, '_tailHeaders 尾行应为最新');
+      ok(`_loadHead 有界读：10000 行 ${ms}ms，计数与尾 hash 正确`);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+  seed5.close();
+
   console.log(`\nPASS: ${passed} 项全过`);
 }
 

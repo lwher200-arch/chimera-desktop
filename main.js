@@ -6,8 +6,8 @@
  *  - 窗口与会话：safeStorage 存 session token（7 天），密码绝不落盘。
  *  - 实时内核 v2：RealtimeClient 常驻主进程（WS 优先，WS 不可用时回落 SSE），
  *    事件经 IPC 推给渲染进程；断线按 lastSeq 续接，truncated 时通知渲染进程
- *    全量重拉。WS 的 group_message 带 body（渲染进程暂仍走增量拉取，body
- *    已随事件透传，供后续增量渲染直接用）。
+ *    全量重拉。WS 的 group_message 带 body，渲染进程直接追加渲染；
+ *    无 body 的（断线补发 / SSE 路）渲染进程用 ?since= 增量拉取。
  *  - 轻节点：NodeManager（lib/nodeManager.js），开关持久化在 store；
  *    启动时若 node.enabled 为真则自动起节点（用户上次的选择）。
  *
@@ -163,6 +163,8 @@ function registerIpc() {
     client.getGroupMessages(groupId, sessionToken(), { since, limit }));
   ipcMain.handle('api:send-group-message', (_e, { groupId, body, attachments }) =>
     client.sendGroupMessage(groupId, sessionToken(), body, attachments || []));
+  ipcMain.handle('api:read', (_e, { groupId, seq }) =>
+    client.markGroupRead(sessionToken(), groupId, seq));
   ipcMain.handle('api:dms', () => client.getDms(sessionToken()));
   ipcMain.handle('api:dm-history', (_e, { peer, since }) =>
     client.getDmHistory(peer, sessionToken(), { since }));
