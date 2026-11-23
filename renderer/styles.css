@@ -20,6 +20,8 @@ input:focus { outline: 2px solid #d9a44155; border-color: #d9a441; }
 .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
 .dot.on { background: #3ecf6f; box-shadow: 0 0 6px #3ecf6f88; }
 .dot.off { background: #5a6478; }
+.dot.warn { background: #e8a33d; box-shadow: 0 0 6px #e8a33d88; } /* SSE 回落 */
+.dot.bad { background: #e5484d; box-shadow: 0 0 6px #e5484d88; } /* 已断开 / 会话失效 */
 
 .view { flex: 1; display: flex; min-height: 0; }
 #view-login { align-items: center; justify-content: center; }

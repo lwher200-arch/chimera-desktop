@@ -54,9 +54,20 @@ function show(view) {
   $('view-main').classList.toggle('hidden', view !== 'main');
 }
 
-function setSse(connected, text) {
-  $('sseDot').className = 'dot ' + (connected ? 'on' : 'off');
-  $('sseText').textContent = text || (connected ? '实时已连接' : '未连接');
+// 传输状态指示器（v0.2.1）：只按主进程推来的 realtime:transport 画，
+// state ∈ connecting | ws | sse | disconnected | session-expired。
+// 颜色：WS 绿、SSE 琥珀、连接中灰、断开/会话失效红。
+const TRANSPORT_UI = {
+  connecting: { cls: 'off', label: '连接中…' },
+  ws: { cls: 'on', label: 'WS 已连接' },
+  sse: { cls: 'warn', label: 'SSE 回落' },
+  disconnected: { cls: 'bad', label: '已断开' },
+  'session-expired': { cls: 'bad', label: '会话失效，请重新登录' },
+};
+function setTransport(state, detail) {
+  const ui = TRANSPORT_UI[state] || TRANSPORT_UI.disconnected;
+  $('sseDot').className = 'dot ' + ui.cls;
+  $('sseText').textContent = detail || ui.label;
 }
 
 // ---------- session ----------
@@ -556,8 +567,9 @@ $('nodeHeadersBtn').addEventListener('click', async () => {
 
 // ---------- SSE wiring (main process owns the connection) ----------
 // 事件只改自己那一项，不再全量 loadAll（原来每事件约 390ms、3 个 HTTP 请求）。
-window.chimera.onSseConnect(() => setSse(true));
-window.chimera.onSseDisconnect(() => setSse(false, '已断开，自动重连中…'));
+// 指示器只走 realtime:transport（v0.2.1）：onSseConnect/onSseDisconnect
+// 不再画指示器，避免两路状态打架。
+window.chimera.onRealtimeTransport(({ state, detail }) => setTransport(state, detail));
 window.chimera.onSseTruncated(() => { if (state.open) loadMessages(); });
 window.chimera.onSseEvent(async ({ event, data, seq }) => {
   if (Number.isFinite(seq)) state.lastSeq = seq;

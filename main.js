@@ -27,6 +27,7 @@ let store = null;
 let client = null;
 let realtime = null;
 let nodeManager = null;
+let lastTransport = null; // 最近一次 realtime:transport，供窗口加载完后补发
 
 function userDataFile(name) {
   return path.join(app.getPath('userData'), name);
@@ -67,6 +68,11 @@ function createWindow() {
     },
   });
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  // 渲染进程订阅 realtime:transport 可能晚于 startRealtime 的第一次
+  // 'connecting'：加载完后把最近的状态补发一次，指示器不留“未连接”。
+  win.webContents.on('did-finish-load', () => {
+    if (lastTransport) sendToRenderer('realtime:transport', lastTransport);
+  });
   win.on('close', () => {
     try {
       const [width, height] = win.getSize();
@@ -83,14 +89,34 @@ function sendToRenderer(channel, payload) {
 // ---- realtime: kernel v2, WS-first + SSE fallback; main process owns it ----
 // IPC 通道名保持 sse:* 不变，渲染进程不用改；connect payload 多带 transport
 //（'ws' | 'sse'），渲染进程忽略多余字段。
+// 状态指示器走新通道 realtime:transport（v0.2.1）：RealtimeClient 每次
+// 传输状态变化都推 {state, detail}，渲染进程只按这个画指示器。
+function sendTransport(payload) {
+  lastTransport = payload;
+  sendToRenderer('realtime:transport', payload);
+}
+
 function startRealtime() {
   stopRealtime();
-  realtime = new RealtimeClient(API_BASE, { token: sessionToken() });
+  const token = sessionToken();
+  realtime = new RealtimeClient(API_BASE, {
+    token,
+    // 会话失效检测（v0.2.1）：只有 /api/me 回 401/403 才算会话死了；
+    // 没 token 时不注入（匿名流没有会话可死）。
+    checkSession: token ? async () => { await client.getMe(sessionToken()); } : undefined,
+  });
   realtime.on('connect', ({ transport }) => {
     console.log('[realtime] transport:', transport);
     sendToRenderer('sse:connect', { at: new Date().toISOString(), transport });
   });
   realtime.on('disconnect', (err) => sendToRenderer('sse:disconnect', { error: String(err && err.message || err) }));
+  realtime.on('transport', (payload) => {
+    console.log('[realtime] state:', payload.state, payload.detail || '');
+    sendTransport(payload);
+  });
+  realtime.on('session-expired', ({ reason }) => {
+    console.log('[realtime] session expired:', reason);
+  });
   realtime.on('truncated', (data) => sendToRenderer('sse:truncated', data));
   realtime.on('event', ({ event, data, seq }) => sendToRenderer('sse:event', { event, data, seq }));
   realtime.start();

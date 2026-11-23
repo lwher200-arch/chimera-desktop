@@ -18,6 +18,7 @@ const { ForumClient } = require('../lib/forumClient');
 const { SseClient } = require('../lib/sseClient');
 const { WsClient } = require('../lib/wsClient');
 const { RealtimeClient } = require('../lib/realtimeClient');
+const { nextBackoffMs, INITIAL_BACKOFF_MS, MAX_BACKOFF_MS } = require('../lib/backoff');
 const { NodeManager } = require('../lib/nodeManager');
 const { Store } = require('../lib/store');
 
@@ -43,6 +44,41 @@ function startMockSeed() {
       res.end(JSON.stringify({ ok: true, posts: 472, accounts: 30, groups: 10, messages: 1676, dms: 7 }));
     });
     server.listen(0, '127.0.0.1', () => resolve(server));
+  });
+}
+
+// 最小 WS 服务端（仅 §7 测试用）：握手后立刻发一条 hello，之后保持连接。
+// 只实现服务端发帧（FIN + opcode 1，小 payload），不解析客户端帧。
+function startMockWsServer() {
+  return new Promise((resolve) => {
+    const sockets = new Set();
+    const server = http.createServer((_req, res) => { res.writeHead(404); res.end(); });
+    server.on('upgrade', (req, socket) => {
+      const key = req.headers['sec-websocket-key'] || '';
+      const accept = crypto.createHash('sha1')
+        .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11', 'utf8').digest('base64');
+      socket.write(
+        'HTTP/1.1 101 Switching Protocols\r\n' +
+        'Upgrade: websocket\r\n' +
+        'Connection: Upgrade\r\n' +
+        `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
+      );
+      sockets.add(socket);
+      socket.on('close', () => sockets.delete(socket));
+      socket.on('error', () => sockets.delete(socket));
+      const payload = Buffer.from(JSON.stringify({
+        type: 'hello',
+        data: { seq: 4200, time: new Date().toISOString() },
+      }), 'utf8');
+      socket.write(Buffer.concat([Buffer.from([0x81, payload.length]), payload]));
+    });
+    server.listen(0, '127.0.0.1', () => resolve({
+      url: `ws://127.0.0.1:${server.address().port}/ws`,
+      close() {
+        for (const s of sockets) { try { s.destroy(); } catch {} }
+        server.close();
+      },
+    }));
   });
 }
 
@@ -564,6 +600,211 @@ async function main() {
     syncG();
     assert.strictEqual(rowEl._hidden, true, '无更早时按钮行应隐藏');
     ok('按钮三态：可点 / 加载中禁用 / 无更早隐藏');
+  }
+
+  console.log('== 7. 状态指示器与退避（v0.2.1）：退避表 + 会话失效停重试 ==');
+  // 7a. 退避表（纯函数，无 live 依赖）：1s 起步翻倍、30s 封顶。
+  {
+    assert.strictEqual(INITIAL_BACKOFF_MS, 1000, '起步应为 1s');
+    assert.strictEqual(MAX_BACKOFF_MS, 30000, '上限应为 30s');
+    assert.strictEqual(nextBackoffMs(undefined), 1000, '未传应回 1000');
+    assert.strictEqual(nextBackoffMs(0), 1000, '0 应回 1000');
+    assert.strictEqual(nextBackoffMs(-5), 1000, '负数应回 1000');
+    assert.strictEqual(nextBackoffMs(NaN), 1000, 'NaN 应回 1000');
+    let d = INITIAL_BACKOFF_MS;
+    const seq = [d];
+    for (let i = 0; i < 6; i++) { d = nextBackoffMs(d); seq.push(d); }
+    assert.deepStrictEqual(seq, [1000, 2000, 4000, 8000, 16000, 30000, 30000],
+      '退避序列应为 1s 起步翻倍、30s 封顶');
+    assert.strictEqual(nextBackoffMs(99999), 30000, '超上限应封顶 30000');
+    ok('退避表：1s 起步翻倍、30s 封顶，非法输入回 1000');
+  }
+  // 7b. 会话失效停重试：WS 在 hello 前就失败 + checkSession 抛 401 →
+  // session-expired，不回落 SSE、不再重试。
+  {
+    const states = [];
+    const rt = new RealtimeClient(API_BASE, {
+      token: 'dead-token-for-test',
+      wsUrl: 'wss://127.0.0.1:9/ws',
+      checkSession: async () => {
+        const e = new Error('HTTP 401');
+        e.status = 401;
+        throw e;
+      },
+    });
+    let fellBack = false;
+    rt.on('fallback', () => { fellBack = true; });
+    rt.on('transport', (p) => states.push(p.state));
+    const expired = new Promise((resolve, reject) => {
+      rt.on('session-expired', resolve);
+      setTimeout(() => reject(new Error('session-expired 未在 10s 内触发')), 10000);
+    });
+    rt.start();
+    const ev = await withTimeout(expired, 12000, 'session-expired');
+    assert.match(ev.reason, /会话已失效/, 'session-expired 应带原因');
+    assert.strictEqual(rt.sessionExpired, true, 'sessionExpired 标志应为真');
+    assert.strictEqual(rt._sse, null, '会话失效后不应起 SSE');
+    assert.strictEqual(rt._ws, null, '会话失效后 WS 应停掉');
+    assert.strictEqual(fellBack, false, '会话失效后不应回落');
+    assert.ok(states.includes('connecting'), '应先报 connecting');
+    assert.ok(states.includes('session-expired'), 'transport 应报 session-expired');
+    await new Promise((r) => setTimeout(r, 2000));
+    assert.strictEqual(rt._sse, null, '2 秒后仍不应起 SSE（不再重试）');
+    rt.stop();
+    ok('会话失效停重试：hello 前失败 + 401 → session-expired，不回落不重试');
+  }
+  // 7c. 瞬断仍回落：同一死端口，checkSession 通过 → 回落 SSE，不报会话失效。
+  {
+    const rt = new RealtimeClient(API_BASE, {
+      token: 'live-token-stub',
+      wsUrl: 'wss://127.0.0.1:9/ws',
+      checkSession: async () => {}, // 会话正常
+    });
+    let expired = false;
+    rt.on('session-expired', () => { expired = true; });
+    const fellBack = new Promise((resolve, reject) => {
+      rt.on('fallback', resolve);
+      setTimeout(() => reject(new Error('fallback 未在 10s 内触发')), 10000);
+    });
+    rt.start();
+    const fb = await withTimeout(fellBack, 12000, '瞬断回落');
+    assert.strictEqual(fb.to, 'sse', '瞬断应回落 SSE');
+    assert.notStrictEqual(rt._sse, null, '回落后 SSE 客户端应已创建');
+    assert.strictEqual(expired, false, '会话正常时不应报 session-expired');
+    rt.stop();
+    ok('瞬断仍回落：checkSession 通过 → 回落 SSE，不报会话失效');
+  }
+  // 7d. 网络错不算会话失效：checkSession 抛无 status 的错 → 仍回落。
+  {
+    const rt = new RealtimeClient(API_BASE, {
+      token: 'live-token-stub',
+      wsUrl: 'wss://127.0.0.1:9/ws',
+      checkSession: async () => { throw new Error('fetch failed'); }, // 网络错，无 status
+    });
+    let expired = false;
+    rt.on('session-expired', () => { expired = true; });
+    const fellBack = new Promise((resolve, reject) => {
+      rt.on('fallback', resolve);
+      setTimeout(() => reject(new Error('fallback 未在 10s 内触发')), 10000);
+    });
+    rt.start();
+    await withTimeout(fellBack, 12000, '网络错回落');
+    assert.strictEqual(expired, false, '网络错不应报 session-expired');
+    rt.stop();
+    ok('网络错不算会话失效：checkSession 抛无 status 的错 → 仍回落 SSE');
+  }
+  // 7e. hello 后会话失效：mock WS 先连上，随后 session-expired、WS 停掉。
+  {
+    const mock = await startMockWsServer();
+    try {
+      const states = [];
+      const rt = new RealtimeClient(API_BASE, {
+        token: 'dead-token-for-test',
+        wsUrl: mock.url,
+        checkSession: async () => {
+          const e = new Error('HTTP 401');
+          e.status = 401;
+          throw e;
+        },
+      });
+      rt.on('transport', (p) => states.push(p.state));
+      const connected = new Promise((resolve, reject) => {
+        rt.on('connect', resolve);
+        setTimeout(() => reject(new Error('connect 未在 10s 内触发')), 10000);
+      });
+      const expired = new Promise((resolve, reject) => {
+        rt.on('session-expired', resolve);
+        setTimeout(() => reject(new Error('session-expired 未在 10s 内触发')), 10000);
+      });
+      rt.start();
+      const c = await withTimeout(connected, 12000, 'mock WS connect');
+      assert.strictEqual(c.transport, 'ws', 'mock WS 应先连上');
+      const ev = await withTimeout(expired, 12000, 'hello 后 session-expired');
+      assert.match(ev.reason, /会话已失效/);
+      assert.strictEqual(rt.sessionExpired, true);
+      assert.strictEqual(rt._ws, null, '会话失效后 WS 应停掉');
+      assert.ok(states.includes('ws'), 'transport 应先报 ws');
+      assert.ok(states.includes('session-expired'), 'transport 应随后报 session-expired');
+      rt.stop();
+      ok('hello 后会话失效：先连上 WS，随后 session-expired、WS 停掉');
+    } finally {
+      mock.close();
+    }
+  }
+  // 7f. hello 后会话正常：mock WS 连上后保持 WS，不报 session-expired。
+  {
+    const mock = await startMockWsServer();
+    try {
+      let expired = false;
+      const rt = new RealtimeClient(API_BASE, {
+        token: 'live-token-stub',
+        wsUrl: mock.url,
+        checkSession: async () => {}, // 会话正常
+      });
+      rt.on('session-expired', () => { expired = true; });
+      const connected = new Promise((resolve, reject) => {
+        rt.on('connect', resolve);
+        setTimeout(() => reject(new Error('connect 未在 10s 内触发')), 10000);
+      });
+      rt.start();
+      const c = await withTimeout(connected, 12000, 'mock WS connect');
+      assert.strictEqual(c.transport, 'ws');
+      await new Promise((r) => setTimeout(r, 1500));
+      assert.strictEqual(expired, false, '会话正常时不应报 session-expired');
+      assert.strictEqual(rt.transport, 'ws', '会话正常时应保持 ws');
+      assert.strictEqual(rt.sessionExpired, false);
+      rt.stop();
+      ok('hello 后会话正常：保持 WS，不报 session-expired');
+    } finally {
+      mock.close();
+    }
+  }
+  // 7g. live /api/me：假 token 应回 401——这是 main.js 里 checkSession
+  // 判定会话失效的依据（只读失败，不写线上状态）。
+  {
+    await assert.rejects(
+      client.getMe('bogus-token-for-test'),
+      (e) => e && e.status === 401,
+      '假 token 调 /api/me 应回 401',
+    );
+    ok('live /api/me：假 token 回 401（会话失效检测的依据）');
+  }
+  // 7h. live transport 事件：正常 WS 应先报 connecting 再报 ws。
+  {
+    const states = [];
+    const rt = new RealtimeClient(API_BASE, {});
+    rt.on('transport', (p) => states.push(p.state));
+    const c = await withTimeout(new Promise((resolve, reject) => {
+      rt.on('connect', resolve);
+      rt.on('disconnect', reject);
+      rt.start();
+    }), 20000, 'live WS transport');
+    assert.strictEqual(c.transport, 'ws');
+    assert.deepStrictEqual(states, ['connecting', 'ws'], 'transport 应先报 connecting 再报 ws');
+    rt.stop();
+    ok('live transport 事件：connecting → ws');
+  }
+  // 7i. live 回落 transport 事件：WS 挂掉后应报 connecting 再报 sse。
+  {
+    const states = [];
+    const rt = new RealtimeClient(API_BASE, { wsUrl: 'wss://127.0.0.1:9/ws' });
+    rt.on('transport', (p) => states.push(p.state));
+    const helloP = new Promise((resolve) => {
+      rt.on('event', (e) => { if (e.event === 'hello') resolve(e); });
+    });
+    const connected = new Promise((resolve, reject) => {
+      rt.on('connect', resolve);
+      rt.on('disconnect', () => { /* 回落前的 WS 断开，忽略 */ });
+    });
+    rt.start();
+    const c = await withTimeout(connected, 20000, '回落 SSE connect');
+    assert.strictEqual(c.transport, 'sse');
+    const helloEv = await withTimeout(helloP, 20000, '回落 SSE hello');
+    assert.ok(Number.isFinite(helloEv.seq), '回落 SSE hello 应带 seq');
+    assert.ok(states.includes('connecting'), '应报 connecting');
+    assert.ok(states.includes('sse'), '回落后应报 sse');
+    rt.stop();
+    ok(`live 回落 transport 事件：connecting → sse，hello seq=${helloEv.seq}`);
   }
 
   console.log(`\nPASS: ${passed} 项全过`);

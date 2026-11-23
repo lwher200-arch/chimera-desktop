@@ -43,6 +43,9 @@ contextBridge.exposeInMainWorld('chimera', {
   onSseConnect: (fn) => ipcRenderer.on('sse:connect', (_e, payload) => fn(payload)),
   onSseDisconnect: (fn) => ipcRenderer.on('sse:disconnect', (_e, payload) => fn(payload)),
   onSseTruncated: (fn) => ipcRenderer.on('sse:truncated', (_e, payload) => fn(payload)),
+  // 传输状态指示器（v0.2.1）：{state, detail}，state ∈ connecting | ws |
+  // sse | disconnected | session-expired。渲染进程只按这个画指示器。
+  onRealtimeTransport: (fn) => ipcRenderer.on('realtime:transport', (_e, payload) => fn(payload)),
   onNodeState: (fn) => ipcRenderer.on('node:state', (_e, payload) => fn(payload)),
   onNodeLog: (fn) => ipcRenderer.on('node:log', (_e, line) => fn(line)),
   onNodeSync: (fn) => ipcRenderer.on('node:sync', (_e, status) => fn(status)),
