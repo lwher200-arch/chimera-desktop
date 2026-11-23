@@ -1371,6 +1371,224 @@ async function main() {
     ok('original-fs：换 asar 时碰 asar 文件的操作都走 fsOrig，不走打补丁的 fs');
   }
 
+  console.log('== 10. 自适应翻译 + 未加入标记 + 板块常驻（v0.3.1）==');
+  const tr = require('../renderer/translate.js');
+  // 10a. 语言检测与散文抽取（纯函数，与网页版同口径）。
+  {
+    assert.strictEqual(tr.detectLang('你好世界'), 'zh', '纯中文应为 zh');
+    assert.strictEqual(tr.detectLang('Hello world, this is English'), 'en', '纯英文应为 en');
+    assert.strictEqual(tr.detectLang('こんにちは世界'), 'ja', '含假名应为 ja');
+    assert.strictEqual(tr.detectLang('안녕하세요'), 'ko', '含韩文应为 ko');
+    assert.strictEqual(tr.detectLang('12345 !!!'), 'unknown', '无字母应为 unknown');
+    assert.strictEqual(tr.detectLang(''), 'unknown', '空串应为 unknown');
+    assert.strictEqual(tr.proseOf('```js\nconst a = 1;\n```  hello'), 'hello', '代码块应被剥掉只剩散文');
+    assert.strictEqual(tr.proseOf('run `npm test` now'), 'run now', '行内 code 应被剥掉');
+    assert.strictEqual(tr.proseOf('```\nonly code\n```'), '', '纯代码块散文应为空');
+    ok('语言检测 zh/en/ja/ko/unknown 与 proseOf 剥代码块');
+  }
+  // 10b. 占位生成：同语言/不明/过短不译，异语言才出 trbox。
+  {
+    tr._resetForTest();
+    assert.strictEqual(tr.placeholder('你好世界'), '', '同语言（中文）不应出翻译框');
+    assert.strictEqual(tr.placeholder('12345 !!!'), '', '源语言不明不应出翻译框');
+    assert.strictEqual(tr.placeholder('a'), '', '散文过短不应出翻译框');
+    const html = tr.placeholder('Hello world, this is an English message.');
+    assert.ok(html.includes('class="trbox"'), '英文内容应对中文用户出翻译框');
+    assert.ok(html.includes('data-trid="at'), '翻译框应带 trid');
+    assert.ok(html.includes('翻译中'), '翻译框应带“翻译中”占位文案');
+    ok('占位生成：异语言出 trbox，同语言/不明/过短不出');
+  }
+  // 10c. 队列：批量 10 条、缓存命中不再调接口、节流自动重试、same 删框。
+  {
+    // 最小假 DOM：只实现队列用到的接口。
+    const makeBox = (id) => ({
+      _html: '', _removed: false, _attrs: { 'data-trid': id },
+      set innerHTML(v) { this._html = v; },
+      get innerHTML() { return this._html; },
+      getAttribute(k) { return this._attrs[k] || null; },
+      removeAttribute(k) { delete this._attrs[k]; },
+      remove() { this._removed = true; },
+      closest() { return this; },
+      querySelector() { return null; },
+    });
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    // 12 条英文 → 两批（10+2），译文全部渲染，切换数据齐全。
+    tr._resetForTest();
+    const calls = [];
+    tr.setBatchFn(async (items, target) => {
+      calls.push({ n: items.length, target });
+      return items.map((it) => ({ translated: `译：${it.text}`, same: false }));
+    });
+    const boxes = [];
+    const root = { querySelectorAll: () => boxes.filter((b) => !b._removed && b.getAttribute('data-trid')) };
+    for (let i = 0; i < 12; i++) {
+      const html = tr.placeholder(`English message number ${i} for batching test.`);
+      assert.ok(html.includes('data-trid'), `第 ${i} 条应出占位`);
+      const id = html.match(/data-trid="(at\d+)"/)[1];
+      boxes.push(makeBox(id));
+    }
+    tr.observeTranslations(root);
+    await sleep(600); // 250ms flush + 批量往返
+    assert.strictEqual(calls.length, 2, `12 条应分 2 批，实际 ${calls.length} 批`);
+    assert.deepStrictEqual(calls.map((c) => c.n), [10, 2], '第一批 10 条、第二批 2 条');
+    assert.strictEqual(calls[0].target, 'zh', '批量目标应为 zh');
+    assert.ok(boxes.every((b) => b._html.includes('译：English message')), '12 条都应渲染出译文');
+    assert.ok(boxes.every((b) => b._html.includes('data-tr-orig') && b._html.includes('data-tr-text')), '译文框应带原文/译文切换数据');
+    assert.strictEqual(tr._cacheSize(), 12, '缓存应记 12 条');
+    ok('队列批量：12 条分 10+2 两批，全部渲染，切换数据齐全');
+    // 缓存命中：同一文本再入队，不再调接口。
+    const cacheBox = makeBox(tr.placeholder('English message number 0 for batching test.').match(/data-trid="(at\d+)"/)[1]);
+    tr.observeTranslations({ querySelectorAll: () => [cacheBox] });
+    await sleep(500);
+    assert.strictEqual(calls.length, 2, '缓存命中不应再调接口');
+    assert.ok(cacheBox._html.includes('译：English message number 0'), '缓存命中应直接渲染译文');
+    ok('缓存命中：同一文本再入队不再调接口，直接渲染');
+    // 节流自动重试：第一次 rate_limited，50ms 后自动重试成功。
+    tr._resetForTest();
+    tr._setRetryDelayMs(50);
+    let tries = 0;
+    tr.setBatchFn(async (items) => {
+      tries += 1;
+      if (tries === 1) return items.map(() => ({ error: 'rate_limited' }));
+      return items.map((it) => ({ translated: `译：${it.text}`, same: false }));
+    });
+    const rlBox = makeBox(tr.placeholder('English message for rate limit retry test.').match(/data-trid="(at\d+)"/)[1]);
+    tr.observeTranslations({ querySelectorAll: () => [rlBox] });
+    await sleep(900);
+    assert.strictEqual(tries, 2, `节流应自动重试一次，实际调了 ${tries} 次`);
+    assert.ok(rlBox._html.includes('译：English message for rate limit'), '重试成功后应渲染译文');
+    ok('节流自动重试：rate_limited 后自动再试一次并渲染');
+    tr._setRetryDelayMs(65000);
+    // same：服务端判同语言（回 translated 原文 + same:true），静默删框只留原文。
+    tr._resetForTest();
+    tr.setBatchFn(async (items) => items.map((it) => ({ translated: it.text, same: true })));
+    const sameBox = makeBox(tr.placeholder('English message that server says same.').match(/data-trid="(at\d+)"/)[1]);
+    tr.observeTranslations({ querySelectorAll: () => [sameBox] });
+    await sleep(500);
+    assert.strictEqual(sameBox._removed, true, 'same 时翻译框应被删掉');
+    ok('same：服务端判同语言时静默删框');
+  }
+  // 10d. ForumClient 翻译接线（mock 服务端）：请求体与鉴权头、批量回包解析。
+  {
+    const mock = await new Promise((resolve) => {
+      const seen = [];
+      const server = http.createServer((req, res) => {
+        let body = '';
+        req.on('data', (c) => { body += c; });
+        req.on('end', () => {
+          seen.push({ method: req.method, url: req.url, auth: req.headers.authorization, body });
+          res.setHeader('Content-Type', 'application/json');
+          if (req.url === '/api/translate') {
+            res.end(JSON.stringify({ ok: true, translated: '译文', cached: false, same: false, src: 'en' }));
+          } else if (req.url === '/api/translate/batch') {
+            const d = JSON.parse(body);
+            res.end(JSON.stringify({ ok: true, results: d.items.map((it) => ({ translated: `译：${it.text}` })) }));
+          } else { res.writeHead(404); res.end('{}'); }
+        });
+      });
+      server.listen(0, '127.0.0.1', () => resolve({ server, seen, base: `http://127.0.0.1:${server.address().port}` }));
+    });
+    try {
+      const mc = new ForumClient(mock.base);
+      const one = await mc.translate('tok-abc', 'Hello', 'zh');
+      assert.strictEqual(one.translated, '译文', '单条翻译应回译文');
+      assert.strictEqual(mock.seen[0].auth, 'Bearer tok-abc', '单条翻译应带 Bearer token');
+      assert.deepStrictEqual(JSON.parse(mock.seen[0].body), { text: 'Hello', target: 'zh' }, '单条请求体应为 {text, target}');
+      const batch = await mc.translateBatch('tok-abc', [{ text: 'a' }, { text: 'b' }], 'zh');
+      assert.strictEqual(batch.results.length, 2, '批量应回 2 条结果');
+      assert.strictEqual(batch.results[1].translated, '译：b', '批量第二条译文应带原文');
+      assert.strictEqual(mock.seen[1].auth, 'Bearer tok-abc', '批量翻译应带 Bearer token');
+      ok('ForumClient 翻译接线：单条/批量请求体与鉴权头正确');
+    } finally { mock.server.close(); }
+  }
+  // 10e. 未加入判定 + 板块过滤（抽 renderer.js 实际发布的函数跑）。
+  {
+    const rendererSrc = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'renderer.js'), 'utf8');
+    const extractFn = (name) => {
+      const m = rendererSrc.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n\\}`));
+      assert.ok(m, `renderer.js 应包含 ${name}`);
+      return m[0];
+    };
+    const isGroupMember = new Function(`${extractFn('isGroupMember')}; return isGroupMember;`)();
+    const g = { id: 'grp-test', members: [{ name: 'coldhao', type: 'human' }, { name: 'xilan', type: 'ai' }] };
+    assert.strictEqual(isGroupMember(g, { username: 'coldhao' }), true, '成员应判为已加入');
+    assert.strictEqual(isGroupMember(g, { username: 'other' }), false, '非成员应判为未加入');
+    assert.strictEqual(isGroupMember(g, null), false, '未登录应判为未加入');
+    assert.strictEqual(isGroupMember({ id: 'g2', members: [] }, { username: 'coldhao' }), false, '空成员表应判为未加入');
+    assert.strictEqual(isGroupMember({ id: 'g3' }, { username: 'coldhao' }), false, '无 members 字段应判为未加入');
+    assert.strictEqual(isGroupMember(g, { username: 'xilan' }), false, '同名 AI 不算人类成员');
+    const filterPostsByBoard = new Function(`${extractFn('filterPostsByBoard')}; return filterPostsByBoard;`)();
+    const posts = [{ board: 'general' }, { board: 'code' }, { board: 'general' }, {}];
+    assert.strictEqual(filterPostsByBoard(posts, null).length, 4, '不过滤应回全部');
+    assert.strictEqual(filterPostsByBoard(posts, 'general').length, 2, 'general 应滤出 2 篇');
+    assert.strictEqual(filterPostsByBoard(posts, 'code').length, 1, 'code 应滤出 1 篇');
+    assert.strictEqual(filterPostsByBoard(posts, 'qa').length, 0, '无帖板块应回空');
+    assert.deepStrictEqual(filterPostsByBoard(null, 'general'), [], '帖子为空应回空数组');
+    ok('isGroupMember 与 filterPostsByBoard 口径正确');
+  }
+  // 10f. messageHtml 接翻译：有 ChimeraTranslate 时英文消息带 trbox，没有时只留原文。
+  {
+    const rendererSrc = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'renderer.js'), 'utf8');
+    const extractFn = (name) => {
+      const m = rendererSrc.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n\\}`));
+      assert.ok(m, `renderer.js 应包含 ${name}`);
+      return m[0];
+    };
+    const escFn = new Function(`${extractFn('esc')}; return esc;`)();
+    const avatarClassFn = new Function(`${extractFn('avatarClass')}; return avatarClass;`)();
+    const avatarInitialFn = new Function(`${extractFn('avatarInitial')}; return avatarInitial;`)();
+    const avatarHtmlFn = new Function('avatarClass', 'avatarInitial', 'esc', `${extractFn('avatarHtml')}; return avatarHtml;`)(avatarClassFn, avatarInitialFn, escFn);
+    const fmtTimeFn = new Function(`${extractFn('fmtTime')}; return fmtTime;`)();
+    const messageHtmlFn = new Function('esc', 'state', 'avatarHtml', 'fmtTime', `${extractFn('messageHtml')}; return messageHtml;`)(escFn, { me: null }, avatarHtmlFn, fmtTimeFn);
+    const msg = { id: 'm1', author: 'alice', ts: new Date().toISOString(), body: 'Hello everyone, this is an English message.' };
+    const plain = messageHtmlFn(msg);
+    assert.ok(!plain.includes('trbox'), '无翻译模块时消息不应带翻译框');
+    assert.ok(plain.includes('Hello everyone'), '无翻译模块时原文应在');
+    tr._resetForTest();
+    globalThis.window = { ChimeraTranslate: tr };
+    try {
+      const withTr = messageHtmlFn(msg);
+      assert.ok(withTr.includes('class="trbox"'), '有翻译模块时英文消息应带翻译框');
+      assert.ok(withTr.includes('Hello everyone'), '原文仍应在气泡里');
+      const zhMsg = { id: 'm2', author: 'bob', ts: new Date().toISOString(), body: '大家好，这是一条中文消息。' };
+      assert.ok(!messageHtmlFn(zhMsg).includes('trbox'), '中文消息对中文用户不应带翻译框');
+    } finally { delete globalThis.window; }
+    ok('messageHtml 接翻译：英文带 trbox、中文不带、无模块只留原文');
+  }
+  // 10g. live 板块 / 社区 / 翻译（只读；上游翻译失败时记注不判败）。
+  {
+    const boards = await withTimeout(client.getBoards(), 15000, 'GET /api/boards');
+    assert.strictEqual(boards.ok, true, 'GET /api/boards 应回 ok');
+    assert.ok(Array.isArray(boards.boards) && boards.boards.length > 0, '板块列表应非空');
+    const ids = boards.boards.map((b) => b.id);
+    assert.ok(ids.includes('general') && ids.includes('code'), '板块应含 general 与 code');
+    ok(`live GET /api/boards：${boards.boards.length} 个板块`);
+    const comms = await withTimeout(client.getCommunities(), 15000, 'GET /api/communities');
+    assert.strictEqual(comms.ok, true, 'GET /api/communities 应回 ok');
+    const eterna = (comms.communities || []).find((c) => c.name === 'eternatide');
+    assert.ok(eterna, '社区列表应有 eternatide');
+    assert.strictEqual(eterna.memberCount, 5, 'eternatide 成员应为 5 人');
+    ok(`live GET /api/communities：eternatide 成员 ${eterna.memberCount} 人、下挂 ${eterna.groupCount} 群`);
+    // 账本未登录应 401（成员 only 的边界）。
+    await assert.rejects(
+      client.getCommunityLedger(null, eterna.id),
+      (e) => e && e.status === 401,
+      '未登录取账本应回 401',
+    );
+    ok('live GET /api/communities/:id/ledger：未登录回 401（成员 only）');
+    // 翻译 live：上游（MyMemory/Google）抖动时 429/502 只记注，不判败。
+    try {
+      const live = await withTimeout(client.translate(null, 'Hello, this is a test message for translation.', 'zh'), 20000, 'POST /api/translate');
+      assert.strictEqual(live.ok, true, 'POST /api/translate 应回 ok');
+      assert.ok(typeof live.translated === 'string' && live.translated.length > 0, '应回非空译文');
+      ok(`live POST /api/translate：en→zh 译文“${live.translated.slice(0, 20)}…”`);
+    } catch (err) {
+      if (err && (err.status === 429 || err.status === 502)) {
+        console.log('  注：上游翻译暂不可用（' + err.status + '），live 翻译未验');
+      } else throw err;
+    }
+  }
+
   console.log(`\nPASS: ${passed} 项全过`);
 }
 

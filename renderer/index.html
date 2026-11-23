@@ -18,9 +18,12 @@
       <button class="nav-btn active" data-view="home">首页</button>
       <button class="nav-btn" data-view="conv">会话</button>
       <button class="nav-btn" data-view="posts">帖子</button>
+      <button class="nav-btn" data-view="community">社区</button>
+      <button class="nav-btn" data-view="team">团队</button>
       <button class="nav-btn" data-view="node">节点 <span id="nodeNavBadge" class="node-badge off">关</span></button>
     </nav>
     <div class="top-right">
+      <button id="langToggle" class="btn ghost" title="切换翻译目标语言">翻译：中文</button>
       <span class="status-pill"><span id="sseDot" class="dot off" title="实时连接状态"></span><span id="sseText" class="muted">未连接</span></span>
       <span id="whoamiAvatar" class="avatar avatar-sm av-0 hidden">?</span>
       <span id="whoami" class="whoami-chip hidden"></span>
@@ -60,9 +63,9 @@
         </div>
         <div id="boardSection">
           <h3>板块</h3>
-          <div id="boardList"><p class="muted small" style="padding:0 10px">加载帖子后显示</p></div>
+          <div id="boardList"><p class="muted small" style="padding:0 10px">加载中…</p></div>
         </div>
-        <div class="sidebar-foot muted small">v0.3.0</div>
+        <div class="sidebar-foot muted small">v0.3.1</div>
       </aside>
       <main id="main">
         <!-- 首页（简版落地页）：与网页版首页同构的精简版，完整版见论坛网页 -->
@@ -74,6 +77,8 @@
             <div class="home-cards">
               <button class="home-card" data-view="conv"><b>会话</b><span class="muted small">群聊和好友都在这里</span></button>
               <button class="home-card" data-view="posts"><b>帖子</b><span class="muted small">看看社区最近在聊什么</span></button>
+              <button class="home-card" data-view="community"><b>社区</b><span class="muted small">成员、群组与模块</span></button>
+              <button class="home-card" data-view="team"><b>团队</b><span class="muted small">团队账本，只读</span></button>
               <button class="home-card" data-view="node"><b>漂流节点</b><span class="muted small">同步副本 · 上传与维护接入中</span></button>
             </div>
             <p class="muted small">完整落地页（协议草案、现状快照、核心理念）在论坛网页版：forum.coldhao.win</p>
@@ -84,6 +89,11 @@
         <div id="pane-conv" class="pane hidden">
           <main id="chatPane">
             <div id="chatHead"><span id="chatAvatar" class="avatar hidden">?</span><b id="chatTitle">选择一个群聊或好友</b><span id="chatMeta" class="muted"></span></div>
+            <div id="chatJoinBanner" class="join-banner hidden">
+              <span id="chatJoinText">你还不是这个群的成员，只能看不能发言。</span>
+              <button id="chatJoinBtn" class="btn primary">加入该群</button>
+              <span id="chatJoinErr" class="err"></span>
+            </div>
             <div id="chatOlderRow" class="hidden" style="padding:8px 16px 0"><button id="chatOlderBtn" class="btn ghost">加载更早的消息</button></div>
             <div id="chatBox" class="chat-box">
           <div class="chat-empty" data-empty="1">
@@ -104,8 +114,24 @@
         <!-- 帖子 -->
         <div id="pane-posts" class="pane hidden">
           <div class="posts-wrap">
-            <div class="list-head"><b>最新帖子</b><span class="spacer"></span><button id="postsRefresh" class="btn ghost">↻ 刷新</button></div>
+            <div class="list-head"><b>最新帖子</b><span id="postsBoardLabel" class="muted small"></span><span class="spacer"></span><button id="postsRefresh" class="btn ghost">↻ 刷新</button></div>
             <div id="postsList" class="items"></div>
+          </div>
+        </div>
+
+        <!-- 社区（v0.3.1，只读） -->
+        <div id="pane-community" class="pane hidden">
+          <div class="posts-wrap">
+            <div class="list-head"><b>社区</b><span class="spacer"></span><button id="communityRefresh" class="btn ghost">↻ 刷新</button></div>
+            <div id="communityBody"></div>
+          </div>
+        </div>
+
+        <!-- 团队（v0.3.1，只读账本） -->
+        <div id="pane-team" class="pane hidden">
+          <div class="posts-wrap">
+            <div class="list-head"><b>团队</b><span class="spacer"></span><button id="teamRefresh" class="btn ghost">↻ 刷新</button></div>
+            <div id="teamBody"></div>
           </div>
         </div>
 
@@ -148,6 +174,7 @@
     </div>
   </section>
 </div>
+<script src="translate.js"></script>
 <script src="renderer.js"></script>
 </body>
 </html>

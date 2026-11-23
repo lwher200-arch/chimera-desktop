@@ -210,6 +210,21 @@ function registerIpc() {
   ipcMain.handle('api:send-dm', (_e, { peer, body, attachments }) =>
     client.sendDm(peer, sessionToken(), body, attachments || []));
   ipcMain.handle('api:posts', (_e, opts) => client.getPosts(sessionToken(), opts || {}));
+  // 翻译（v0.3.1）：单条 + 批量，走 /api/translate（带 session token）。
+  ipcMain.handle('api:translate', (_e, { text, target, source }) =>
+    client.translate(sessionToken(), text, target, source || null));
+  ipcMain.handle('api:translate-batch', (_e, { items, target }) =>
+    client.translateBatch(sessionToken(), items, target));
+  // 板块常驻（v0.3.1）：直接取全部板块，不再等帖子拉回来。
+  ipcMain.handle('api:boards', () => client.getBoards());
+  // 社区 / 团队（v0.3.1，只读）。
+  ipcMain.handle('api:communities', () => client.getCommunities(sessionToken()));
+  ipcMain.handle('api:community', (_e, { id }) => client.getCommunity(sessionToken(), id));
+  ipcMain.handle('api:community-ledger', (_e, { id, limit }) =>
+    client.getCommunityLedger(sessionToken(), id, { limit }));
+  // 加群（v0.3.1）：以当前登录用户名自加；服务端不放行时原样抛错，渲染进程展示原话。
+  ipcMain.handle('api:join-group', (_e, { groupId }) =>
+    client.joinGroup(sessionToken(), groupId, store.state.session?.username));
   ipcMain.handle('api:upload', (_e, { filePath }) => client.uploadFile(sessionToken(), filePath));
   ipcMain.handle('api:upload-blob', async (_e, { name, base64 }) => {
     // 粘贴图片 / 文件选择器拿到的 File 只有内存数据，没有磁盘路径：
