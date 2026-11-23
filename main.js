@@ -19,14 +19,26 @@ const { Store } = require('./lib/store');
 const { ForumClient } = require('./lib/forumClient');
 const { RealtimeClient } = require('./lib/realtimeClient');
 const { NodeManager } = require('./lib/nodeManager');
+const { ServerResolver, PRIMARY_BASE } = require('./lib/serverResolver');
+const { AppUpdater } = require('./lib/appUpdater');
 
-const API_BASE = process.env.CHIMERA_API_BASE || 'https://forum.coldhao.win';
+const API_BASE = process.env.CHIMERA_API_BASE || PRIMARY_BASE;
+
+// 服务端 URL 解析（单例）：主 URL 公网域名、备 URL 尾网 het。
+// ForumClient（REST，渲染进程的数据层）与 RealtimeClient（WS/SSE）
+// 共用这一个 resolver——主 URL 挂了自动切尾网，恢复后切回，
+// 两路不各走各的。更新检查（AppUpdater 的清单）也走它。
+const resolver = new ServerResolver({ primary: API_BASE });
+resolver.on('switch', ({ from, to }) => {
+  console.log(`[server] 基地址切换：${from} -> ${to}（${resolver.label()}）`);
+});
 
 let win = null;
 let store = null;
 let client = null;
 let realtime = null;
 let nodeManager = null;
+let updater = null;
 let lastTransport = null; // 最近一次 realtime:transport，供窗口加载完后补发
 
 function userDataFile(name) {
@@ -101,6 +113,7 @@ function startRealtime() {
   const token = sessionToken();
   realtime = new RealtimeClient(API_BASE, {
     token,
+    resolver,
     // 会话失效检测（v0.2.1）：只有 /api/me 回 401/403 才算会话死了；
     // 没 token 时不注入（匿名流没有会话可死）。
     checkSession: token ? async () => { await client.getMe(sessionToken()); } : undefined,
@@ -234,14 +247,33 @@ function registerIpc() {
 
 app.whenReady().then(async () => {
   store = new Store(userDataFile('state.json'));
-  client = new ForumClient(API_BASE);
+  client = new ForumClient(API_BASE, { resolver });
+  // 轻量 asar 自动更新：先看有没有上次暂存的新版，有就换上并 relaunch
+  // 一次（上次是被杀掉、退出时没来得及换的情况）；换不上就继续跑旧版。
+  updater = new AppUpdater({
+    currentVersion: app.getVersion(),
+    userDataDir: app.getPath('userData'),
+    appAsarPath: app.getAppPath(),
+    getBase: () => resolver.getBase(),
+  });
+  if (updater.applyPendingUpdate()) {
+    app.relaunch();
+    app.quit();
+    return;
+  }
   createWindow();
   registerIpc();
   startRealtime();
+  updater.startPeriodicCheck(); // 启动 15 秒后查一次，之后每 6 小时查一次
   await initNode();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+});
+
+// 退出时把暂存的新 asar 换上去（下次启动即新版）；换不上也不阻塞退出。
+app.on('before-quit', () => {
+  try { if (updater) updater.applyPendingUpdate(); } catch { /* 换不上就算了 */ }
 });
 
 app.on('window-all-closed', () => {

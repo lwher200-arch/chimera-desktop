@@ -30,6 +30,50 @@ npm run dist:linux   # 打 Linux AppImage 到 dist/
 首次打开 → 用论坛账号登录（用户名 + 密码，密码只用于本次换会话，
 不存本地）→ 会话面选群聊。
 
+## 服务端 URL fallback（断网自动切尾网）
+
+桌面端只认一个论坛基地址是不够的：lenghao 的公网出口一抖，
+`forum.coldhao.win` 就连不上，尽管论坛本身健康、尾网
+`100.79.244.3:8899` 还通。基地址解析放在 `lib/serverResolver.js`，
+REST（ForumClient，主窗口的数据层）与实时流（RealtimeClient 的
+WS/SSE）共用同一个 resolver：
+
+- 主：`https://forum.coldhao.win`（公网；可用 `CHIMERA_API_BASE` 覆盖）
+- 备：`http://100.79.244.3:8899`（尾网 het；只有尾网内的机器能连上）
+- 只有当前基地址被证实挂了才切（先探当前基地址的 `/api/health`，
+  还通就不切）；另一边也不通时留在当前基地址上继续按退避重试，
+  不来回切——公网用户没有尾网地址，就永远留在主地址上。
+- 切到备地址后每 60 秒探一次主地址，通了就切回；已建立的 WS/SSE
+  连接不受影响，只影响新发起的请求/连接。
+- 指示器会显示当前走哪条路（`WS 已连接（尾网）`），主进程日志里
+  有 `[server] 基地址切换：…` 的记录。
+
+## 自动更新（无感更新，不用 electron-updater）
+
+实现在 `lib/appUpdater.js`，流程：查清单 → 后台下载 → 校验 sha256
+→ 暂存 → 下次启动/退出时换上。用户不用动手。
+
+- **版本来源（清单）**：启动后 15 秒查一次，之后每 6 小时查一次，
+  查的是 `{基地址}/desktop-update.json`（走 resolver，与 fallback
+  共用同一解析；公网断了也能经尾网查到）。清单格式：
+  `{ "version": "0.2.1", "asarUrl": "https://github.com/lwher200-arch/chimera-desktop/releases/download/v0.2.1/app.asar", "sha256": "<hex>", "notes": "…" }`。
+  清单不存在（404）= 还没发布过更新，静默当“无更新”。
+- **校验**：下载的 asar 的 sha256 必须与清单里的对上，对不上就丢弃、
+  不换、不崩；下载失败也一样。换 asar 前把当前 asar 备份为
+  `app.asar.bak`（与 asar 同目录）；回滚就是把 `.bak` 拷回 `app.asar`
+  再重启。
+- **换的时机**：退出时（before-quit）换上，下次启动即新版；上次是
+  被杀掉、退出时没来得及换的，启动时再换一次并 relaunch。开发模式
+  （`npm start`，app 目录不是 .asar）不换 asar，只查、只下、只暂存。
+
+**发版时要做的事（否则桌面端发现不了更新）**：每次发版除打
+zip/AppImage 外，还要做两件——① 把本次的 `app.asar` 传到 GitHub
+Release 当附件（`npm run dist:linux` 后从 `dist/linux-unpacked/resources/app.asar`
+取，或 `npx asar pack` 只打 `main.js preload.js renderer/ lib/ package.json`）；
+② 把论坛 `public` 目录下的 `desktop-update.json` 更新为新版的
+`{version, asarUrl（指到该 Release 的 app.asar 附件）, sha256}`。
+桌面端只认清单，不直接猜 Release——清单没更新，桌面端就不知道。
+
 ## 打包
 
 - **Windows 安装包（NSIS，推荐）**：必须在 Windows 机器上构建。

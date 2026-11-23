@@ -19,6 +19,8 @@ const { SseClient } = require('../lib/sseClient');
 const { WsClient } = require('../lib/wsClient');
 const { RealtimeClient } = require('../lib/realtimeClient');
 const { nextBackoffMs, INITIAL_BACKOFF_MS, MAX_BACKOFF_MS } = require('../lib/backoff');
+const { ServerResolver, PRIMARY_BASE, FALLBACK_BASE } = require('../lib/serverResolver');
+const { AppUpdater, compareVersions, sha256Hex } = require('../lib/appUpdater');
 const { NodeManager } = require('../lib/nodeManager');
 const { Store } = require('../lib/store');
 
@@ -805,6 +807,561 @@ async function main() {
     assert.ok(states.includes('sse'), '回落后应报 sse');
     rt.stop();
     ok(`live 回落 transport 事件：connecting → sse，hello seq=${helloEv.seq}`);
+  }
+
+  console.log('== 8. 服务端 URL fallback（v0.2.1+1）：主挂切备、恢复切回、不死循环 ==');
+  // 可变的 mock health fetch：按基地址前缀决定 /api/health 通不通。
+  // state = { primary, fallback }，测试里随时改，模拟主/备恢复与挂掉。
+  function mockHealthFetch(state, primary, fallback) {
+    return async (url) => {
+      const u = String(url);
+      if (u.startsWith(primary)) {
+        if (state.primary) return { ok: true };
+        throw new Error('fetch failed');
+      }
+      if (u.startsWith(fallback)) {
+        if (state.fallback) return { ok: true };
+        throw new Error('fetch failed');
+      }
+      throw new Error(`fetch failed: 未知地址 ${u}`);
+    };
+  }
+  // 既能回 /api/health、又能接 WS（握手后发 hello）的 mock 论坛。
+  function startMockForumServer() {
+    return new Promise((resolve) => {
+      const sockets = new Set();
+      const server = http.createServer((req, res) => {
+        if (req.url === '/api/health' || req.url.startsWith('/api/health?')) {
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ ok: true, posts: 1, accounts: 1, groups: 1 }));
+          return;
+        }
+        res.writeHead(404); res.end();
+      });
+      server.on('upgrade', (req, socket) => {
+        const key = req.headers['sec-websocket-key'] || '';
+        const accept = crypto.createHash('sha1')
+          .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11', 'utf8').digest('base64');
+        socket.write(
+          'HTTP/1.1 101 Switching Protocols\r\n' +
+          'Upgrade: websocket\r\n' +
+          'Connection: Upgrade\r\n' +
+          `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
+        );
+        sockets.add(socket);
+        socket.on('close', () => sockets.delete(socket));
+        socket.on('error', () => sockets.delete(socket));
+        const payload = Buffer.from(JSON.stringify({
+          type: 'hello',
+          data: { seq: 7777, time: new Date().toISOString() },
+        }), 'utf8');
+        socket.write(Buffer.concat([Buffer.from([0x81, payload.length]), payload]));
+      });
+      server.listen(0, '127.0.0.1', () => resolve({
+        base: `http://127.0.0.1:${server.address().port}`,
+        close() {
+          for (const s of sockets) { try { s.destroy(); } catch {} }
+          server.close();
+        },
+      }));
+    });
+  }
+  // 8a. probe：通的回 true，挂的回 false；默认主/备地址常量正确。
+  {
+    assert.strictEqual(PRIMARY_BASE, 'https://forum.coldhao.win', '主地址应为公网域名');
+    assert.strictEqual(FALLBACK_BASE, 'http://100.79.244.3:8899', '备地址应为尾网 het');
+    const state = { primary: true, fallback: false };
+    const r = new ServerResolver({
+      primary: 'http://127.0.0.1:9', fallback: 'http://127.0.0.1:10',
+      fetch: mockHealthFetch(state, 'http://127.0.0.1:9', 'http://127.0.0.1:10'),
+    });
+    assert.strictEqual(r.getBase(), 'http://127.0.0.1:9', '初始应在主地址');
+    assert.strictEqual(r.label(), '公网', '主地址标签应为公网');
+    assert.strictEqual(await r.probe('http://127.0.0.1:9'), true, '通的基地址 probe 应为真');
+    assert.strictEqual(await r.probe('http://127.0.0.1:10'), false, '挂的基地址 probe 应为假');
+    r.stop();
+    ok('probe：通 true / 挂 false，主备常量正确');
+  }
+  // 8b. reportFailure：主挂 + 备通 → 切到备地址，发 switch 事件。
+  {
+    const state = { primary: false, fallback: true };
+    const r = new ServerResolver({
+      primary: 'http://127.0.0.1:9', fallback: 'http://127.0.0.1:10',
+      fetch: mockHealthFetch(state, 'http://127.0.0.1:9', 'http://127.0.0.1:10'),
+    });
+    const switches = [];
+    r.on('switch', (e) => switches.push(e));
+    const to = await r.reportFailure();
+    assert.strictEqual(to, 'http://127.0.0.1:10', '应切到备地址');
+    assert.strictEqual(r.getBase(), 'http://127.0.0.1:10', '切后 getBase 应为备地址');
+    assert.strictEqual(r.isFallback, true, '切后 isFallback 应为真');
+    assert.strictEqual(r.label(), '尾网', '备地址标签应为尾网');
+    assert.strictEqual(switches.length, 1, '应只发一次 switch');
+    assert.strictEqual(switches[0].from, 'http://127.0.0.1:9');
+    assert.strictEqual(switches[0].to, 'http://127.0.0.1:10');
+    r.stop();
+    ok('reportFailure：主挂 + 备通 → 切备地址，发一次 switch');
+  }
+  // 8c. reportFailure：当前基地址还通 → 不切（只是某条路的问题）。
+  {
+    const state = { primary: true, fallback: true };
+    const r = new ServerResolver({
+      primary: 'http://127.0.0.1:9', fallback: 'http://127.0.0.1:10',
+      fetch: mockHealthFetch(state, 'http://127.0.0.1:9', 'http://127.0.0.1:10'),
+    });
+    let switched = false;
+    r.on('switch', () => { switched = true; });
+    assert.strictEqual(await r.reportFailure(), null, '当前还通时应返回 null');
+    assert.strictEqual(r.getBase(), 'http://127.0.0.1:9', '当前还通时不应切');
+    assert.strictEqual(switched, false, '当前还通时不应发 switch');
+    r.stop();
+    ok('reportFailure：当前还通 → 不切');
+  }
+  // 8d. reportFailure：两边都挂 → 留在当前基地址，不死循环切来切去。
+  {
+    const state = { primary: false, fallback: false };
+    const r = new ServerResolver({
+      primary: 'http://127.0.0.1:9', fallback: 'http://127.0.0.1:10',
+      fetch: mockHealthFetch(state, 'http://127.0.0.1:9', 'http://127.0.0.1:10'),
+    });
+    let switches = 0;
+    r.on('switch', () => { switches += 1; });
+    assert.strictEqual(await r.reportFailure(), null, '两边都挂时应返回 null');
+    assert.strictEqual(r.getBase(), 'http://127.0.0.1:9', '两边都挂时应留在主地址');
+    assert.strictEqual(await r.reportFailure(), null, '再报一次仍应返回 null');
+    assert.strictEqual(switches, 0, '两边都挂时不应发 switch');
+    r.stop();
+    ok('reportFailure：两边都挂 → 留在主地址，不切、不循环');
+  }
+  // 8e. recheck：切到备地址后主地址恢复 → 60 秒探一次，通了切回。
+  {
+    const state = { primary: false, fallback: true };
+    const r = new ServerResolver({
+      primary: 'http://127.0.0.1:9', fallback: 'http://127.0.0.1:10',
+      fetch: mockHealthFetch(state, 'http://127.0.0.1:9', 'http://127.0.0.1:10'),
+      recheckMs: 100,
+    });
+    const switches = [];
+    r.on('switch', (e) => switches.push(e));
+    await r.reportFailure();
+    assert.strictEqual(r.isFallback, true, '先应切到备地址');
+    state.primary = true; // 主地址恢复
+    await new Promise((resolve, reject) => {
+      const t0 = Date.now();
+      const timer = setInterval(() => {
+        if (!r.isFallback) { clearInterval(timer); resolve(); }
+        else if (Date.now() - t0 > 5000) { clearInterval(timer); reject(new Error('5 秒内未切回主地址')); }
+      }, 50);
+    });
+    assert.strictEqual(r.getBase(), 'http://127.0.0.1:9', '主地址恢复后应切回');
+    assert.strictEqual(switches.length, 2, '应共发两次 switch（去备、回主）');
+    assert.strictEqual(switches[1].to, 'http://127.0.0.1:9', '第二次 switch 应指回主地址');
+    r.stop();
+    ok('recheck：备地址上主恢复 → 切回主地址');
+  }
+  // 8f. RealtimeClient 经备地址连上 WS：主地址是死端口、备地址是 mock
+  // 论坛，WS 首次失败应先切基地址再重连 WS（不直接掉到 SSE），
+  // 指示器 detail 应带“尾网”。
+  {
+    const mock = await startMockForumServer();
+    try {
+      const r = new ServerResolver({ primary: 'http://127.0.0.1:9', fallback: mock.base });
+      const states = [];
+      const rt = new RealtimeClient('http://127.0.0.1:9', { resolver: r });
+      rt.on('transport', (p) => states.push(p));
+      const c = await withTimeout(new Promise((resolve, reject) => {
+        rt.on('connect', resolve);
+        rt.on('disconnect', () => { /* 切地址前的 WS 断开，忽略 */ });
+        rt.start();
+      }), 15000, 'Realtime 经备地址连 WS');
+      assert.strictEqual(c.transport, 'ws', '备地址通时应走 WS（不是 SSE）');
+      assert.strictEqual(rt.transport, 'ws');
+      assert.strictEqual(r.isFallback, true, '应已切到备地址');
+      assert.strictEqual(r.getBase(), mock.base, 'getBase 应为 mock 论坛地址');
+      assert.ok(c.seq === 7777, 'hello seq 应为 mock 的 7777');
+      const wsState = states.find((p) => p.state === 'ws');
+      assert.ok(wsState, 'transport 应报过 ws');
+      assert.ok(String(wsState.detail || '').includes('尾网'), `ws 的 detail 应带“尾网”，实际 ${wsState.detail}`);
+      rt.stop();
+      r.stop();
+      ok('RealtimeClient：主挂切备后经 WS 连上，指示器带“尾网”');
+    } finally {
+      mock.close();
+    }
+  }
+  // 8g. ForumClient 经 resolver：主地址死端口、备地址 mock 论坛，
+  // GET /api/health 应自动切备并重试一次成功；HTTP 错误不切地址。
+  {
+    const mock = await startMockForumServer();
+    try {
+      const r = new ServerResolver({ primary: 'http://127.0.0.1:9', fallback: mock.base });
+      const client2 = new ForumClient('http://127.0.0.1:9', { resolver: r });
+      const health = await withTimeout(client2.getHealth(), 15000, 'ForumClient 经备地址 getHealth');
+      assert.strictEqual(health.ok, true, '备地址的 /api/health 应回 ok');
+      assert.strictEqual(r.isFallback, true, 'GET 失败后应已切到备地址');
+      // HTTP 错误不切：备地址回 404 时应抛 ForumApiError，且不切回主地址。
+      const before = r.getBase();
+      await assert.rejects(
+        client2.request('/api/does-not-exist-xyz'),
+        (e) => e && e.status === 404,
+        '不存在的路径应回 404',
+      );
+      assert.strictEqual(r.getBase(), before, 'HTTP 404 不应切基地址');
+      r.stop();
+      ok('ForumClient：GET 失败切备重试成功，HTTP 错误不切地址');
+    } finally {
+      mock.close();
+    }
+  }
+
+  // 8h. 并发 reportFailure 只切一次：两路同时报故障，共用同一轮探测，
+  // 只发一条 switch（此前实测会切出第二条 from/to 都是备地址的记录）。
+  {
+    const state = { primary: false, fallback: true };
+    let probes = 0;
+    const r = new ServerResolver({
+      primary: 'http://127.0.0.1:9', fallback: 'http://127.0.0.1:10',
+      fetch: async (url) => {
+        probes += 1;
+        // 探测故意慢一点（20ms），让两路调用撞进同一轮。
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return mockHealthFetch(state, 'http://127.0.0.1:9', 'http://127.0.0.1:10')(url);
+      },
+    });
+    const switches = [];
+    r.on('switch', (e) => switches.push(e));
+    const [a, b] = await Promise.all([r.reportFailure(), r.reportFailure()]);
+    assert.strictEqual(a, 'http://127.0.0.1:10', '第一路应切到备地址');
+    assert.strictEqual(b, 'http://127.0.0.1:10', '第二路应拿到同一结果');
+    assert.strictEqual(r.getBase(), 'http://127.0.0.1:10', '应停在备地址');
+    assert.strictEqual(switches.length, 1, '并发两路只应发一条 switch');
+    assert.ok(probes <= 2, `并发两路应共用一轮探测，实际探了 ${probes} 次`);
+    r.stop();
+    ok('并发 reportFailure：两路共用一轮探测，只发一条 switch');
+  }
+
+  // 8i. hello 超时直接 reject：TCP 接通但不握手（模拟 SYN 通了、应用层
+  // 不回 hello），_connectOnce 应在 ~10 秒 reject，不无限挂住。
+  // 这是 lenghao 实测的根因：公网出口抖时 WS 卡在 SYN-SENT，
+  // 只靠 close() 等 onclose 会等不到，failover 永远不触发。
+  {
+    const net = require('node:net');
+    const server = net.createServer((socket) => {
+      // 接通后什么都不回：不握手、不发 hello、不关。
+      socket.on('error', () => {});
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = server.address().port;
+    try {
+      const ws = new WsClient(`http://127.0.0.1:${port}`, {});
+      const t0 = Date.now();
+      await assert.rejects(
+        ws._connectOnce(),
+        // 两种都算过：TCP 已通时 close() 会同步触发 onclose（close 1006）；
+        // TCP 卡在 SYN-SENT 时 onclose 不触发，靠定时器直接 reject（hello 超时）。
+        // 关键是 ~10 秒一定落定，不无限挂住。
+        (e) => /hello 超时|WS 连接失败/.test(e && e.message || ''),
+        '_connectOnce 挂起时应在 ~10 秒 reject',
+      );
+      const ms = Date.now() - t0;
+      assert.ok(ms >= 9000 && ms < 15000, `hello 超时应在 ~10 秒触发，实际 ${ms}ms`);
+      ws.stop();
+      ok(`hello 超时 reject：挂起的 _connectOnce 在 ${ms}ms reject，不无限挂住`);
+    } finally {
+      server.close();
+    }
+  }
+  // 8j. resolver 已预先切到备地址：RealtimeClient 直接走备地址 WS，
+  // 不用先失败再切（REST 先报故障的场景）。
+  {
+    const mock = await startMockForumServer();
+    try {
+      const r = new ServerResolver({ primary: 'http://127.0.0.1:9', fallback: mock.base });
+      await r.reportFailure(); // 先切到备地址
+      assert.strictEqual(r.isFallback, true, '应已预先切到备地址');
+      const rt = new RealtimeClient('http://127.0.0.1:9', { resolver: r });
+      const c = await withTimeout(new Promise((resolve, reject) => {
+        rt.on('connect', resolve);
+        rt.on('disconnect', reject);
+        rt.start();
+      }), 15000, '预先切备后 WS 直连');
+      assert.strictEqual(c.transport, 'ws', '预先切备后应直接走 WS');
+      assert.strictEqual(rt.transport, 'ws');
+      rt.stop();
+      r.stop();
+      ok('预先切备：RealtimeClient 直接走备地址 WS');
+    } finally {
+      mock.close();
+    }
+  }
+
+  console.log('== 9. 轻量 asar 自动更新（v0.2.1+1）：版本号比较、sha 校验、失败不换 ==');
+  // mock fetch 的最小 Response：{status, ok, json(), arrayBuffer()}。
+  function mockResponse({ status = 200, json = null, bytes = null }) {
+    return {
+      status,
+      ok: status >= 200 && status < 300,
+      json: async () => {
+        if (json === null) throw new Error('no json');
+        return json;
+      },
+      arrayBuffer: async () => {
+        const buf = bytes ? Buffer.from(bytes) : Buffer.alloc(0);
+        return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+      },
+    };
+  }
+  // 9a. 版本号比较：纯函数，逐段数字比。
+  {
+    assert.strictEqual(compareVersions('0.2.1', '0.2.0'), 1, '0.2.1 > 0.2.0');
+    assert.strictEqual(compareVersions('0.2.0', '0.2.1'), -1, '0.2.0 < 0.2.1');
+    assert.strictEqual(compareVersions('0.2.1', '0.2.1'), 0, '相等应为 0');
+    assert.strictEqual(compareVersions('1.0.0', '0.9.9'), 1, '1.0.0 > 0.9.9');
+    assert.strictEqual(compareVersions('0.10.0', '0.9.0'), 1, '0.10.0 > 0.9.0（数字比，不是字典序）');
+    assert.strictEqual(compareVersions('0.2', '0.2.0'), 0, '0.2 与 0.2.0 相等');
+    assert.strictEqual(sha256Hex(Buffer.from('abc')), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad', 'sha256(abc) 应为已知值');
+    ok('版本号比较：逐段数字比，0.10.0 > 0.9.0；sha256(abc) 已知值正确');
+  }
+  // 9b. checkForUpdates：404（未发布清单）→ 无更新不报错；版本旧 → 有更新；
+  // 版本不新 → 已是最新；清单格式错 / 网络错 → check-failed。
+  {
+    const asarBytes = Buffer.from('fake-asar-bytes-v021');
+    const asarSha = sha256Hex(asarBytes);
+    const manifest = { version: '0.2.1', asarUrl: 'https://example.invalid/app.asar', sha256: asarSha, notes: 'test' };
+    // 404：未发布清单
+    {
+      const up = new AppUpdater({
+        currentVersion: '0.2.0', userDataDir: '/tmp/nope',
+        fetch: async () => mockResponse({ status: 404 }),
+      });
+      const info = await up.checkForUpdates();
+      assert.strictEqual(info.available, false, '404 应无更新');
+      assert.strictEqual(info.reason, 'no-manifest', '404 原因应为 no-manifest');
+    }
+    // 有新版
+    {
+      const up = new AppUpdater({
+        currentVersion: '0.2.0', userDataDir: '/tmp/nope',
+        fetch: async (url) => {
+          assert.ok(String(url).endsWith('/desktop-update.json'), '清单应走服务端基地址');
+          return mockResponse({ json: manifest });
+        },
+      });
+      const info = await up.checkForUpdates();
+      assert.strictEqual(info.available, true, '0.2.1 > 0.2.0 应有更新');
+      assert.strictEqual(info.version, '0.2.1');
+      assert.strictEqual(info.sha256, asarSha);
+    }
+    // 已是最新
+    {
+      const up = new AppUpdater({
+        currentVersion: '0.2.1', userDataDir: '/tmp/nope',
+        fetch: async () => mockResponse({ json: manifest }),
+      });
+      const info = await up.checkForUpdates();
+      assert.strictEqual(info.available, false, '已是 0.2.1 应无更新');
+      assert.strictEqual(info.reason, 'up-to-date');
+    }
+    // 清单格式错
+    {
+      const up = new AppUpdater({
+        currentVersion: '0.2.0', userDataDir: '/tmp/nope',
+        fetch: async () => mockResponse({ json: { version: '0.2.1' } }),
+      });
+      const info = await up.checkForUpdates();
+      assert.strictEqual(info.available, false, '格式错的清单应无更新');
+      assert.strictEqual(info.reason, 'check-failed');
+    }
+    // 网络错
+    {
+      const up = new AppUpdater({
+        currentVersion: '0.2.0', userDataDir: '/tmp/nope',
+        fetch: async () => { throw new Error('fetch failed'); },
+      });
+      const info = await up.checkForUpdates();
+      assert.strictEqual(info.available, false, '网络错应无更新');
+      assert.strictEqual(info.reason, 'check-failed');
+    }
+    ok('checkForUpdates：404 无更新、有新版、已是最新、格式错、网络错五态正确');
+  }
+  // 9c. downloadAndStage：sha 对上才暂存；sha 不符 / 下载失败不留文件。
+  {
+    const asarBytes = Buffer.from('fake-asar-bytes-v021');
+    const asarSha = sha256Hex(asarBytes);
+    const info = { version: '0.2.1', asarUrl: 'https://example.invalid/app.asar', sha256: asarSha };
+    // 成功：暂存 asar + pending.json，内容与 sha 一致
+    {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'chimera-upd-ok-'));
+      try {
+        const up = new AppUpdater({
+          currentVersion: '0.2.0', userDataDir: tmp,
+          fetch: async () => mockResponse({ bytes: asarBytes }),
+        });
+        const r = await up.downloadAndStage(info);
+        assert.strictEqual(r.ok, true, 'sha 对上应暂存成功');
+        assert.strictEqual(r.bytes, asarBytes.length);
+        assert.strictEqual(r.sha256, asarSha);
+        assert.ok(fs.existsSync(up.pendingAsar), '暂存 asar 应存在');
+        assert.ok(fs.existsSync(up.pendingManifest), 'pending.json 应存在');
+        assert.strictEqual(sha256Hex(fs.readFileSync(up.pendingAsar)), asarSha, '暂存文件 sha 应与清单一致');
+        const meta = JSON.parse(fs.readFileSync(up.pendingManifest, 'utf8'));
+        assert.strictEqual(meta.version, '0.2.1');
+        assert.strictEqual(meta.sha256, asarSha);
+      } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+    }
+    // sha 不符：不暂存
+    {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'chimera-upd-badsha-'));
+      try {
+        const up = new AppUpdater({
+          currentVersion: '0.2.0', userDataDir: tmp,
+          fetch: async () => mockResponse({ bytes: Buffer.from('tampered-bytes') }),
+        });
+        const r = await up.downloadAndStage(info);
+        assert.strictEqual(r.ok, false, 'sha 不符应失败');
+        assert.match(r.error, /sha256 不符/, '错误应说明 sha256 不符');
+        assert.strictEqual(fs.existsSync(up.pendingAsar), false, 'sha 不符不应留暂存 asar');
+        assert.strictEqual(fs.existsSync(up.pendingManifest), false, 'sha 不符不应留 pending.json');
+      } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+    }
+    // 下载 HTTP 失败：不暂存
+    {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'chimera-upd-dl-'));
+      try {
+        const up = new AppUpdater({
+          currentVersion: '0.2.0', userDataDir: tmp,
+          fetch: async () => mockResponse({ status: 500 }),
+        });
+        const r = await up.downloadAndStage(info);
+        assert.strictEqual(r.ok, false, '下载 500 应失败');
+        assert.strictEqual(fs.existsSync(up.pendingAsar), false, '下载失败不应留暂存');
+      } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+    }
+    ok('downloadAndStage：sha 对上暂存，sha 不符/下载失败不留文件');
+  }
+  // 9d. applyPendingUpdate：暂存验过才换，旧 asar 备份为 .bak，暂存清掉；
+  // 暂存 sha 坏了不换、旧 asar 不动、坏暂存删掉；开发模式（目录）不换。
+  {
+    // 换成功
+    {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'chimera-upd-apply-'));
+      try {
+        const appDir = path.join(tmp, 'resources');
+        fs.mkdirSync(appDir, { recursive: true });
+        const asarPath = path.join(appDir, 'app.asar');
+        fs.writeFileSync(asarPath, Buffer.from('old-asar-v020'));
+        const newBytes = Buffer.from('new-asar-v021');
+        const up = new AppUpdater({
+          currentVersion: '0.2.0', userDataDir: tmp, appAsarPath: asarPath,
+        });
+        fs.mkdirSync(up.updatesDir, { recursive: true });
+        fs.writeFileSync(up.pendingAsar, newBytes);
+        fs.writeFileSync(up.pendingManifest, JSON.stringify({ version: '0.2.1', sha256: sha256Hex(newBytes) }));
+        assert.strictEqual(up.applyPendingUpdate(), true, '暂存验过应换上');
+        assert.strictEqual(fs.readFileSync(asarPath, 'utf8'), 'new-asar-v021', 'app.asar 应为新内容');
+        assert.strictEqual(fs.readFileSync(asarPath + '.bak', 'utf8'), 'old-asar-v020', '旧 asar 应备份为 .bak');
+        assert.strictEqual(fs.existsSync(up.pendingAsar), false, '换上后暂存 asar 应清掉');
+        assert.strictEqual(fs.existsSync(up.pendingManifest), false, '换上后 pending.json 应清掉');
+        assert.strictEqual(up.applyPendingUpdate(), false, '无暂存时再换应为 false');
+      } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+    }
+    // 暂存 sha 坏了：不换，旧 asar 不动，坏暂存删掉
+    {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'chimera-upd-applybad-'));
+      try {
+        const appDir = path.join(tmp, 'resources');
+        fs.mkdirSync(appDir, { recursive: true });
+        const asarPath = path.join(appDir, 'app.asar');
+        fs.writeFileSync(asarPath, Buffer.from('old-asar-v020'));
+        const up = new AppUpdater({
+          currentVersion: '0.2.0', userDataDir: tmp, appAsarPath: asarPath,
+        });
+        fs.mkdirSync(up.updatesDir, { recursive: true });
+        fs.writeFileSync(up.pendingAsar, Buffer.from('tampered'));
+        fs.writeFileSync(up.pendingManifest, JSON.stringify({ version: '0.2.1', sha256: sha256Hex(Buffer.from('something-else')) }));
+        assert.strictEqual(up.applyPendingUpdate(), false, '暂存 sha 坏了不应换');
+        assert.strictEqual(fs.readFileSync(asarPath, 'utf8'), 'old-asar-v020', '旧 asar 应原样不动');
+        assert.strictEqual(fs.existsSync(asarPath + '.bak'), false, '没换就不应产生 .bak');
+        assert.strictEqual(fs.existsSync(up.pendingAsar), false, '坏暂存应被删掉');
+      } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+    }
+    // 开发模式（appAsarPath 是目录）：不换
+    {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'chimera-upd-dev-'));
+      try {
+        const up = new AppUpdater({
+          currentVersion: '0.2.0', userDataDir: tmp, appAsarPath: tmp,
+        });
+        fs.mkdirSync(up.updatesDir, { recursive: true });
+        fs.writeFileSync(up.pendingAsar, Buffer.from('x'));
+        fs.writeFileSync(up.pendingManifest, JSON.stringify({ version: '0.2.1', sha256: sha256Hex(Buffer.from('x')) }));
+        assert.strictEqual(up.applyPendingUpdate(), false, '开发模式（目录）不应换 asar');
+      } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+    }
+    ok('applyPendingUpdate：换成功备 .bak，sha 坏不换、开发模式不换');
+  }
+  // 9e. 全流程（mock）：查清单 → 有新版 → 下载暂存 → 换上，旧版进 .bak。
+  {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'chimera-upd-flow-'));
+    try {
+      const appDir = path.join(tmp, 'resources');
+      fs.mkdirSync(appDir, { recursive: true });
+      const asarPath = path.join(appDir, 'app.asar');
+      fs.writeFileSync(asarPath, Buffer.from('old-asar-v020'));
+      const newBytes = Buffer.from('new-asar-v021-full-flow');
+      const newSha = sha256Hex(newBytes);
+      const manifest = { version: '0.2.1', asarUrl: 'https://example.invalid/app.asar', sha256: newSha };
+      const up = new AppUpdater({
+        currentVersion: '0.2.0', userDataDir: tmp, appAsarPath: asarPath,
+        getBase: () => 'https://forum.coldhao.win',
+        fetch: async (url) => {
+          if (String(url).endsWith('/desktop-update.json')) return mockResponse({ json: manifest });
+          return mockResponse({ bytes: newBytes });
+        },
+      });
+      const info = await up.checkForUpdates();
+      assert.strictEqual(info.available, true, '全流程：应发现新版');
+      const staged = await up.downloadAndStage(info);
+      assert.strictEqual(staged.ok, true, '全流程：应下载暂存成功');
+      assert.strictEqual(up.applyPendingUpdate(), true, '全流程：应换上');
+      assert.strictEqual(fs.readFileSync(asarPath, 'utf8'), 'new-asar-v021-full-flow', '全流程：app.asar 应为新内容');
+      assert.strictEqual(fs.readFileSync(asarPath + '.bak', 'utf8'), 'old-asar-v020', '全流程：旧版应进 .bak');
+    } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+    ok('全流程：查清单 → 下载暂存 → 换上，旧版进 .bak');
+  }
+  // 9f. applyPendingUpdate 走 original-fs 操作 asar（Electron 回归）：
+  // lenghao 实测：打补丁的 fs 把 app.asar 当归档，copy/rename 报
+  // “ENOENT, not found in .../app.asar”，换 asar 失败。注入一个
+  // 计数版 fsOrig，断言碰 asar 文件的操作都走了它。
+  {
+    const fs2 = require('fs');
+    const calls = [];
+    const countingFs = {
+      existsSync: (p) => { calls.push(['existsSync', p]); return fs2.existsSync(p); },
+      copyFileSync: (s, d) => { calls.push(['copyFileSync', s, d]); return fs2.copyFileSync(s, d); },
+      renameSync: (s, d) => { calls.push(['renameSync', s, d]); return fs2.renameSync(s, d); },
+      unlinkSync: (p) => { calls.push(['unlinkSync', p]); return fs2.unlinkSync(p); },
+    };
+    const dir = fs2.mkdtempSync(path.join(os.tmpdir(), 'chimera-upd-fsorig-'));
+    const appAsar = path.join(dir, 'app.asar');
+    fs2.writeFileSync(appAsar, 'old');
+    const up = new AppUpdater({
+      currentVersion: '0.2.1', userDataDir: dir, appAsarPath: appAsar,
+      fsOrig: countingFs,
+    });
+    fs2.mkdirSync(up.updatesDir, { recursive: true });
+    fs2.writeFileSync(up.pendingAsar, 'new');
+    fs2.writeFileSync(up.pendingManifest, JSON.stringify({ version: '0.2.2', sha256: sha256Hex(Buffer.from('new')) }));
+    const applied = up.applyPendingUpdate();
+    assert.strictEqual(applied, true, '应换上');
+    // 碰 asar 文件本身的三步（exists、备份 copy、rename）都走了注入的 fsOrig。
+    // 任一路径参数以 .asar / .asar.bak 结尾即算碰 asar 文件。
+    const asarOps = calls.filter((c) => c.slice(1).some((a) => String(a).endsWith('.asar') || String(a).endsWith('.asar.bak')));
+    assert.ok(asarOps.some(([m]) => m === 'existsSync'), 'existsSync(app.asar) 应走 fsOrig');
+    assert.ok(asarOps.some(([m, s, d]) => m === 'copyFileSync' && String(d).endsWith('.asar.bak')), '备份 copy 应走 fsOrig');
+    assert.ok(asarOps.some(([m, s, d]) => m === 'renameSync' && String(d).endsWith('.asar')), 'rename 到 app.asar 应走 fsOrig');
+    assert.strictEqual(fs2.readFileSync(appAsar, 'utf8'), 'new');
+    ok('original-fs：换 asar 时碰 asar 文件的操作都走 fsOrig，不走打补丁的 fs');
   }
 
   console.log(`\nPASS: ${passed} 项全过`);
