@@ -312,6 +312,260 @@ async function main() {
   }
   seed5.close();
 
+  console.log('== 6. 消息窗口（v0.2.1+1）：DOM 上限 + 向前翻页 + 贴底判断 ==');
+  // 从 renderer.js 源码里抽出窗口相关函数（与 §5a 同一做法：测实际发布的
+  // 代码，不是复制品），跑在一个最小假 DOM 上。假 DOM 只实现渲染进程
+  // 用到的接口：innerHTML / insertAdjacentHTML / querySelector(.msg、
+  // [data-empty]) / querySelectorAll(.msg) / scrollTop / scrollHeight /
+  // clientHeight / remove()。每条消息假高 40px，只验滚动补偿的算术。
+  {
+    const rendererSrc = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'renderer.js'), 'utf8');
+    const MAX_RENDERED = Number((rendererSrc.match(/const MAX_RENDERED = (\d+);/) || [])[1]);
+    const PAGE_SIZE = Number((rendererSrc.match(/const PAGE_SIZE = (\d+);/) || [])[1]);
+    const NEAR_BOTTOM_PX = Number((rendererSrc.match(/const NEAR_BOTTOM_PX = (\d+);/) || [])[1]);
+    assert.strictEqual(MAX_RENDERED, 300, 'DOM 上限应为 300 条');
+    assert.strictEqual(PAGE_SIZE, 100, '每页应为 100 条');
+    assert.strictEqual(NEAR_BOTTOM_PX, 120, '贴底判定应为 120px');
+    const extractFn = (name) => {
+      const m = rendererSrc.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n\\}`));
+      assert.ok(m, `renderer.js 应包含 ${name}`);
+      return m[0];
+    };
+    const escFn = new Function(`${extractFn('esc')}; return esc;`)();
+    const messageHtmlFn = new Function('esc', `${extractFn('messageHtml')}; return messageHtml;`)(escFn);
+
+    function makeEl(cls, id, parent) {
+      return {
+        cls, dataset: { id: id || '' }, height: 40, _parent: parent,
+        remove() { if (this._parent) this._parent._removeChild(this); },
+      };
+    }
+    function parseChildren(html, parent) {
+      const out = [];
+      const re = /<div class="msg" data-id="([^"]*)">/g;
+      let m;
+      while ((m = re.exec(html)) !== null) out.push(makeEl('msg', m[1], parent));
+      if (/data-empty="1"/.test(html)) {
+        const el = makeEl('muted-empty', '', parent);
+        el.height = 20;
+        out.push(el);
+      }
+      return out;
+    }
+    function makeBox() {
+      const box = {
+        _children: [],
+        _scrollTop: 0,
+        clientHeight: 400,
+        // 真实浏览器里 scrollTop 会被钳制到 [0, scrollHeight - clientHeight]；
+        // 假 DOM 也照此钳制，否则“滚到底”的断言会量到未钳制的原值。
+        get scrollTop() { return this._scrollTop; },
+        set scrollTop(v) {
+          const max = Math.max(0, this.scrollHeight - this.clientHeight);
+          this._scrollTop = Math.max(0, Math.min(v, max));
+        },
+        get scrollHeight() { return this._children.reduce((s, c) => s + (c.height || 0), 0); },
+        set innerHTML(html) { this._children = parseChildren(html, this); },
+        get innerHTML() { return ''; },
+        insertAdjacentHTML(pos, html) {
+          const kids = parseChildren(html, this);
+          if (pos === 'afterbegin') this._children.unshift(...kids);
+          else this._children.push(...kids);
+        },
+        querySelector(sel) {
+          if (sel === '.msg') return this._children.find((c) => c.cls === 'msg') || null;
+          if (sel === '[data-empty]') return this._children.find((c) => c.cls === 'muted-empty') || null;
+          return null;
+        },
+        querySelectorAll(sel) {
+          if (sel === '.msg') return this._children.filter((c) => c.cls === 'msg');
+          return [];
+        },
+        _removeChild(el) { const i = this._children.indexOf(el); if (i >= 0) this._children.splice(i, 1); },
+      };
+      return box;
+    }
+    function makeRowBtn() {
+      return {
+        _hidden: true,
+        classList: { toggle(_cls, force) { this._owner._hidden = !!force; } },
+        disabled: false,
+        textContent: '',
+      };
+    }
+    const box = makeBox();
+    const rowEl = makeRowBtn();
+    rowEl.classList._owner = rowEl;
+    const btnEl = { disabled: false, textContent: '' };
+    const $fake = (id) => ({ chatBox: box, chatOlderRow: rowEl, chatOlderBtn: btnEl }[id] || null);
+    const mkMsg = (i) => ({
+      id: `m${i}`, author: 'a', ts: new Date(Date.UTC(2026, 10, 23, 0, 0, i)).toISOString(), body: `msg ${i}`,
+    });
+    const freshState = () => ({
+      open: { kind: 'group', id: 'g1', name: 't' },
+      lastTs: null, renderedIds: new Set(), hasMoreOlder: false, loadingOlder: false,
+    });
+    let state = freshState();
+    const renderMessages = new Function('state', '$', 'messageHtml', 'MAX_RENDERED',
+      `${extractFn('renderMessages')}; return renderMessages;`)(state, $fake, messageHtmlFn, MAX_RENDERED);
+    const appendMessages = new Function('state', '$', 'messageHtml', 'MAX_RENDERED', 'NEAR_BOTTOM_PX',
+      `${extractFn('appendMessages')}; return appendMessages;`)(state, $fake, messageHtmlFn, MAX_RENDERED, NEAR_BOTTOM_PX);
+    const prependMessages = new Function('state', '$', 'messageHtml',
+      `${extractFn('prependMessages')}; return prependMessages;`)(state, $fake, messageHtmlFn);
+    const syncOlderButton = new Function('state', '$',
+      `${extractFn('syncOlderButton')}; return syncOlderButton;`)(state, $fake);
+
+    // 6a. 初拉 120 条：全渲染，水位为最后一条。
+    renderMessages(Array.from({ length: 120 }, (_, i) => mkMsg(i + 1)));
+    assert.strictEqual(box.querySelectorAll('.msg').length, 120, '初拉 120 条应全渲染');
+    assert.strictEqual(state.renderedIds.size, 120, 'renderedIds 应记 120 条');
+    assert.strictEqual(state.lastTs, mkMsg(120).ts, '水位应为最后一条 ts');
+    ok('初拉 120 条全渲染，水位正确');
+
+    // 6b. 初拉 350 条（防御性上限）：只留最新 300 条，hasMoreOlder 为真。
+    state = freshState();
+    const render2 = new Function('state', '$', 'messageHtml', 'MAX_RENDERED',
+      `${extractFn('renderMessages')}; return renderMessages;`)(state, $fake, messageHtmlFn, MAX_RENDERED);
+    render2(Array.from({ length: 350 }, (_, i) => mkMsg(i + 1)));
+    assert.strictEqual(box.querySelectorAll('.msg').length, 300, '350 条初拉应只渲染 300 条');
+    assert.strictEqual(box.querySelector('.msg').dataset.id, 'm51', '应留最新的 300 条（m51 起）');
+    assert.strictEqual(state.hasMoreOlder, true, '超上限初拉应标 hasMoreOlder');
+    ok('初拉 350 条只留最新 300 条，hasMoreOlder 为真');
+
+    // 6c. 追加超上限：100 条初拉 + 250 条追加 → 留 300 条，最老的 50 条
+    // 节点与 id 一起被裁掉，最新一条与水位 intact。
+    state = freshState();
+    const render3 = new Function('state', '$', 'messageHtml', 'MAX_RENDERED',
+      `${extractFn('renderMessages')}; return renderMessages;`)(state, $fake, messageHtmlFn, MAX_RENDERED);
+    const append3 = new Function('state', '$', 'messageHtml', 'MAX_RENDERED', 'NEAR_BOTTOM_PX',
+      `${extractFn('appendMessages')}; return appendMessages;`)(state, $fake, messageHtmlFn, MAX_RENDERED, NEAR_BOTTOM_PX);
+    render3(Array.from({ length: 100 }, (_, i) => mkMsg(i + 1)));
+    box.scrollTop = box.scrollHeight - box.clientHeight; // 贴底
+    append3(Array.from({ length: 250 }, (_, i) => mkMsg(101 + i)));
+    assert.strictEqual(box.querySelectorAll('.msg').length, 300, '追加后 DOM 应裁到 300 条');
+    assert.strictEqual(box.querySelector('.msg').dataset.id, 'm51', '应裁掉最老的 50 条');
+    assert.strictEqual(state.renderedIds.size, 300, 'renderedIds 应同步裁到 300');
+    assert.ok(!state.renderedIds.has('m1') && state.renderedIds.has('m350'), '被裁 id 应出 Set，最新 id 应在');
+    assert.strictEqual(state.lastTs, mkMsg(350).ts, '水位应为最新一条');
+    ok('追加超上限：DOM 与 renderedIds 同裁到 300 条，最老 50 条出局');
+
+    // 6d. 贴底判断：滚上去读旧消息时新消息不抢滚动；贴底时才滚到底。
+    box.scrollTop = 1000; // 离底 12000-1000-400=10600，远大于 120
+    const topBefore = box.scrollTop;
+    append3([mkMsg(351)]);
+    assert.strictEqual(box.scrollTop, topBefore, '滚上去时追加不应动 scrollTop');
+    box.scrollTop = box.scrollHeight - box.clientHeight; // 回到底部
+    append3([mkMsg(352)]);
+    assert.strictEqual(box.scrollTop, box.scrollHeight - box.clientHeight, '贴底时追加应滚到底');
+    ok('贴底判断：上翻时不抢滚动，贴底时滚到底');
+
+    // 6e. 向前追加 2 条：插到顶上，scrollTop 按插入高度补偿，id 补进 Set。
+    state = freshState();
+    const render5 = new Function('state', '$', 'messageHtml', 'MAX_RENDERED',
+      `${extractFn('renderMessages')}; return renderMessages;`)(state, $fake, messageHtmlFn, MAX_RENDERED);
+    const prepend5 = new Function('state', '$', 'messageHtml',
+      `${extractFn('prependMessages')}; return prependMessages;`)(state, $fake, messageHtmlFn);
+    render5(Array.from({ length: 100 }, (_, i) => mkMsg(101 + i))); // m101..m200
+    box.scrollTop = 500;
+    const hBefore = box.scrollHeight;
+    prepend5([mkMsg(99), mkMsg(100)]);
+    assert.strictEqual(box.querySelector('.msg').dataset.id, 'm99', '前翻的应插到最顶上');
+    assert.strictEqual(box.scrollTop, 500 + (box.scrollHeight - hBefore), 'scrollTop 应按插入高度补偿');
+    assert.ok(state.renderedIds.has('m99') && state.renderedIds.has('m100'), '前翻的 id 应进 Set');
+    assert.strictEqual(state.lastTs, mkMsg(200).ts, '前翻不应动水位');
+    ok('向前追加：插顶、scrollTop 补偿、id 进 Set、水位不动');
+
+    // 6f. loadOlderMessages：假服务端 250 条，按服务端 paginate 口径回页。
+    // 第一页翻回 100 条、has_more 仍真；第二页翻回剩下 50 条、has_more 假；
+    // 再点不发请求。另：已到 300 上限时直接关按钮、不发请求。
+    {
+      const serverMsgs = Array.from({ length: 250 }, (_, i) => mkMsg(i + 1));
+      let calls = 0;
+      const fakeApi = {
+        groupMessages: async (_id, opts = {}) => {
+          calls += 1;
+          let list = serverMsgs;
+          if (opts.before_id) {
+            const idx = list.findIndex((x) => x.id === opts.before_id);
+            list = idx >= 0 ? list.slice(0, idx) : [];
+          }
+          let hasMore = false;
+          if (opts.limit) {
+            const limit = Math.max(1, Math.min(100, parseInt(opts.limit, 10) || 20));
+            if (list.length > limit) { hasMore = true; list = list.slice(list.length - limit); }
+          }
+          return { messages: list, total: serverMsgs.length, has_more: hasMore };
+        },
+        dmHistory: async () => { throw new Error('本节只测群聊'); },
+      };
+      const fakeWindow = { chimera: { api: fakeApi } };
+      state = freshState();
+      const render6 = new Function('state', '$', 'messageHtml', 'MAX_RENDERED',
+        `${extractFn('renderMessages')}; return renderMessages;`)(state, $fake, messageHtmlFn, MAX_RENDERED);
+      const prepend6 = new Function('state', '$', 'messageHtml',
+        `${extractFn('prependMessages')}; return prependMessages;`)(state, $fake, messageHtmlFn);
+      const sync6 = new Function('state', '$',
+        `${extractFn('syncOlderButton')}; return syncOlderButton;`)(state, $fake);
+      const loadOlder = new Function('state', '$', 'window', 'prependMessages', 'syncOlderButton', 'MAX_RENDERED', 'PAGE_SIZE',
+        `${extractFn('loadOlderMessages')}; return loadOlderMessages;`)(state, $fake, fakeWindow, prepend6, sync6, MAX_RENDERED, PAGE_SIZE);
+      render6(serverMsgs.slice(-100)); // 初拉最新 100 条 m151..m250
+      state.hasMoreOlder = true;
+      box.scrollTop = 2000;
+      const top6 = box.scrollTop;
+      await loadOlder();
+      assert.strictEqual(calls, 1, '第一页应发 1 次请求');
+      assert.strictEqual(box.querySelectorAll('.msg').length, 200, '第一页应翻回 100 条，共 200 条');
+      assert.strictEqual(box.querySelector('.msg').dataset.id, 'm51', '第一页最顶上应为 m51');
+      assert.strictEqual(state.hasMoreOlder, true, '还剩 50 条，hasMoreOlder 应仍真');
+      assert.ok(box.scrollTop > top6, '前翻后 scrollTop 应补偿上移');
+      await loadOlder();
+      assert.strictEqual(calls, 2, '第二页应发第 2 次请求');
+      assert.strictEqual(box.querySelectorAll('.msg').length, 250, '第二页应翻回剩下 50 条，共 250 条');
+      assert.strictEqual(state.hasMoreOlder, false, '翻完应无更早，hasMoreOlder 为假');
+      await loadOlder();
+      assert.strictEqual(calls, 2, '无更早时再点不应发请求');
+      ok('向前翻页：两页翻完 250 条，has_more 收敛，不再发请求');
+
+      // 上限守卫：已渲染 300 条时点翻页，直接关按钮、不发请求。
+      state = freshState();
+      const render7 = new Function('state', '$', 'messageHtml', 'MAX_RENDERED',
+        `${extractFn('renderMessages')}; return renderMessages;`)(state, $fake, messageHtmlFn, MAX_RENDERED);
+      const prepend7 = new Function('state', '$', 'messageHtml',
+        `${extractFn('prependMessages')}; return prependMessages;`)(state, $fake, messageHtmlFn);
+      const sync7 = new Function('state', '$',
+        `${extractFn('syncOlderButton')}; return syncOlderButton;`)(state, $fake);
+      const loadOlder7 = new Function('state', '$', 'window', 'prependMessages', 'syncOlderButton', 'MAX_RENDERED', 'PAGE_SIZE',
+        `${extractFn('loadOlderMessages')}; return loadOlderMessages;`)(state, $fake, fakeWindow, prepend7, sync7, MAX_RENDERED, PAGE_SIZE);
+      render7(Array.from({ length: 350 }, (_, i) => mkMsg(i + 1))); // 裁到 300 条
+      state.hasMoreOlder = true;
+      const callsBefore = calls;
+      await loadOlder7();
+      assert.strictEqual(calls, callsBefore, '已到上限时翻页不应发请求');
+      assert.strictEqual(state.hasMoreOlder, false, '已到上限时应关掉翻页');
+      assert.strictEqual(rowEl._hidden, true, '已到上限时按钮行应隐藏');
+      ok('上限守卫：已渲染 300 条时翻页不发请求、按钮隐藏');
+    }
+
+    // 6g. 按钮三态：有更早→显示可点；加载中→禁用“加载中…”；无更早→隐藏。
+    state = freshState();
+    const syncG = new Function('state', '$',
+      `${extractFn('syncOlderButton')}; return syncOlderButton;`)(state, $fake);
+    state.hasMoreOlder = true;
+    syncG();
+    assert.strictEqual(rowEl._hidden, false, '有更早时按钮行应显示');
+    assert.strictEqual(btnEl.disabled, false, '有更早时按钮应可点');
+    assert.strictEqual(btnEl.textContent, '加载更早的消息', '按钮文案应为加载更早的消息');
+    state.loadingOlder = true;
+    syncG();
+    assert.strictEqual(btnEl.disabled, true, '加载中按钮应禁用');
+    assert.strictEqual(btnEl.textContent, '加载中…', '加载中文案应为加载中…');
+    state.loadingOlder = false;
+    state.hasMoreOlder = false;
+    syncG();
+    assert.strictEqual(rowEl._hidden, true, '无更早时按钮行应隐藏');
+    ok('按钮三态：可点 / 加载中禁用 / 无更早隐藏');
+  }
+
   console.log(`\nPASS: ${passed} 项全过`);
 }
 

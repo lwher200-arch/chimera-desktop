@@ -8,11 +8,25 @@
  *    本地 +1；打开群聊时发 receipt 清掉该群未读。
  *  - loadAll 只在登录 / 启动时跑，实时事件不再触发它（原来每事件约 390ms、
  *    3 个 HTTP 请求；现在事件只改自己那一项）。
- *  - 图片转 base64 分块做（32KB 一块），不再用展开运算符一次传整个文件，
- *    120KB 以上图片不再 RangeError；失败时弹提示，不再静默丢掉。
+ *  - 消息窗口有界（v0.2.1+1）：聊天区 DOM 最多留 300 条。打开会话初拉 100 条；
+ *    有更早消息时顶上出现“加载更早的消息”，点一次用 ?before_id= 往前翻一页
+ *    （服务端 paginate 支持 before_id + limit，群聊与私聊同口径）；追加新消息
+ *    超出上限时从顶上裁掉最老的节点与 id（长会话 DOM 不再无界长大）。
+ *    滚动补偿：前翻时按插入高度调 scrollTop，视图不动；新消息只在贴底时才
+ *    自动滚到底，正在往上翻旧消息时不抢滚动位置。
+ *  - 私聊初拉也带 limit:100：此前 dmHistory 不带 limit，服务端 paginate 无
+ *    limit 时全量返回，长私聊会在打开时全量 innerHTML 重渲染。
+ *  - 打开群聊即清本地未读徽章（此前要等第一条实时事件 seq 到才清）。
  * 断线重连靠主进程的 RealtimeClient（WS 优先、SSE 回落，lastSeq 续接）。
  * 不轮询（节点面板 5 秒定时器已删，节点状态由 node:state / node:sync 事件推）。 */
 const $ = (id) => document.getElementById(id);
+
+// 消息窗口：DOM 里最多留多少条消息；每页向前翻多少条（服务端 paginate
+// 的 limit 上限就是 100，再大也会被截到 100）。
+const MAX_RENDERED = 300;
+const PAGE_SIZE = 100;
+// 贴底判定：离底部不到这么多像素就认为在看最新消息，新消息到时自动滚到底。
+const NEAR_BOTTOM_PX = 120;
 
 const state = {
   me: null,
@@ -27,6 +41,8 @@ const state = {
   unread: {}, // gid -> 未读数（本地维护，unread 事件 / receipt ack 校准）
   pending: [], // { name, base64 } 待发送图片
   nodeStatus: null,
+  hasMoreOlder: false, // 顶上“加载更早的消息”是否可点（服务端 has_more）
+  loadingOlder: false, // 正在向前翻页
 };
 
 function esc(s) {
@@ -172,12 +188,13 @@ function bumpUnread(gid, delta) {
   paintUnreadBadges();
 }
 
-// 打开群聊即清未读：WS 路走 receipt（回 ack 带全量 unread），SSE 回落时
-// sendReceipt 返回 false，改走 REST POST /api/read。失败不挡阅读。
+// 打开群聊即清未读：本地徽章先清（打开就代表已读）；WS 路走 receipt
+// （回 ack 带全量 unread），SSE 回落时 sendReceipt 返回 false，改走 REST
+// POST /api/read。receipt 发不出去时下次 unread 事件再校准，不挡阅读。
 async function markGroupRead(gid) {
+  if (state.unread[gid]) { state.unread[gid] = 0; paintUnreadBadges(); }
   if (!Number.isFinite(state.lastSeq)) return;
   const seq = state.lastSeq;
-  if (state.unread[gid]) { state.unread[gid] = 0; paintUnreadBadges(); }
   try {
     const viaWs = await window.chimera.realtime.sendReceipt({ groupId: gid, seq });
     if (viaWs === false) {
@@ -194,6 +211,9 @@ async function openConv(kind, id) {
   state.open = { kind, id, name };
   state.lastTs = null;
   state.renderedIds = new Set();
+  state.hasMoreOlder = false;
+  state.loadingOlder = false;
+  syncOlderButton();
   $('chatTitle').textContent = name;
   $('chatMeta').textContent = kind === 'group' ? '群聊' : '私聊';
   $('chatInputRow').classList.remove('hidden');
@@ -207,16 +227,71 @@ async function loadMessages() {
   try {
     let data;
     if (state.open.kind === 'group') {
-      data = await window.chimera.api.groupMessages(state.open.id, { limit: 100 });
+      data = await window.chimera.api.groupMessages(state.open.id, { limit: PAGE_SIZE });
       renderMessages(data.messages || data || []);
     } else {
-      data = await window.chimera.api.dmHistory(state.open.id);
+      // 私聊也要带 limit：服务端 paginate 无 limit 时全量返回，长私聊
+      // 打开时会把全部历史一次 innerHTML 重渲染。
+      data = await window.chimera.api.dmHistory(state.open.id, { limit: PAGE_SIZE });
       renderMessages(data.messages || data || []);
     }
+    state.hasMoreOlder = !!(data && data.has_more);
+    syncOlderButton();
   } catch (err) {
+    state.hasMoreOlder = false;
+    syncOlderButton();
     $('chatBox').innerHTML = `<div class="muted">加载失败：${esc(err.message || err)}</div>`;
   }
 }
+
+// 向前翻一页：用最老一条的 id 当 before_id，服务端只回它之前的 PAGE_SIZE 条。
+// 显式按钮触发（不做滚到顶自动翻，免得误触与滚动跳动）；翻页时按插入高度
+// 补偿 scrollTop，读到的位置不动。已到 DOM 上限时不再提供翻页。
+async function loadOlderMessages() {
+  if (!state.open || state.loadingOlder || !state.hasMoreOlder) return;
+  const box = $('chatBox');
+  const first = box.querySelector('.msg');
+  const oldestId = first && first.dataset ? first.dataset.id : null;
+  if (!oldestId) return;
+  if (box.querySelectorAll('.msg').length >= MAX_RENDERED) {
+    state.hasMoreOlder = false;
+    syncOlderButton();
+    return;
+  }
+  state.loadingOlder = true;
+  syncOlderButton();
+  try {
+    let data;
+    if (state.open.kind === 'group') {
+      data = await window.chimera.api.groupMessages(state.open.id, { before_id: oldestId, limit: PAGE_SIZE });
+    } else {
+      data = await window.chimera.api.dmHistory(state.open.id, { before_id: oldestId, limit: PAGE_SIZE });
+    }
+    const older = data.messages || data || [];
+    if (!older.length) {
+      state.hasMoreOlder = false;
+    } else {
+      prependMessages(older);
+      state.hasMoreOlder = !!(data && data.has_more);
+    }
+  } catch { /* 翻页失败不清空已有内容，按钮还在，下次再点 */ }
+  finally {
+    state.loadingOlder = false;
+    syncOlderButton();
+  }
+}
+
+function syncOlderButton() {
+  const row = $('chatOlderRow');
+  const btn = $('chatOlderBtn');
+  if (!row || !btn) return;
+  const show = !!state.open && (state.hasMoreOlder || state.loadingOlder);
+  row.classList.toggle('hidden', !show);
+  btn.disabled = state.loadingOlder || !state.hasMoreOlder;
+  btn.textContent = state.loadingOlder ? '加载中…' : '加载更早的消息';
+}
+
+$('chatOlderBtn').addEventListener('click', loadOlderMessages);
 
 // 只拉上次时间戳之后的新消息（服务端 ?since= 按 ts > 过滤），追加进当前视图。
 // fullFallback 为真且一无所获时全量重拉一次（防两条消息 ts 撞到同一毫秒被漏掉）。
@@ -245,24 +320,33 @@ async function fetchNewMessages(fullFallback) {
 function messageHtml(m) {
   const atts = (m.attachments || []).map((a) =>
     `<a href="${esc(a.url)}" target="_blank"><img class="thumb" src="${esc(a.url)}" alt="图片"></a>`).join('');
-  return `<div class="msg"><b>${esc(m.author || m.from || '?')}</b>
+  // data-id 供窗口裁剪与向前翻页（before_id）找最老一条用。
+  return `<div class="msg" data-id="${esc(m.id || '')}"><b>${esc(m.author || m.from || '?')}</b>
     <span class="muted small">${esc(m.ts || '')}</span>
     <div>${esc(m.body || '')}</div>${atts}</div>`;
 }
 
 function renderMessages(msgs) {
   const box = $('chatBox');
-  box.innerHTML = msgs.map((m) => messageHtml(m)).join('') || '<div class="muted" data-empty="1">暂无消息</div>';
-  state.renderedIds = new Set(msgs.map((m) => m.id).filter(Boolean));
+  // 防御性上限：服务端万一回得比窗口大，只渲染最新的 MAX_RENDERED 条，
+  // 其余算“更早的消息”，顶上按钮可翻。
+  const list = msgs.length > MAX_RENDERED ? msgs.slice(msgs.length - MAX_RENDERED) : msgs;
+  if (msgs.length > MAX_RENDERED) state.hasMoreOlder = true;
+  box.innerHTML = list.map((m) => messageHtml(m)).join('') || '<div class="muted" data-empty="1">暂无消息</div>';
+  state.renderedIds = new Set(list.map((m) => m.id).filter(Boolean));
   box.scrollTop = box.scrollHeight;
-  if (msgs.length) state.lastTs = msgs[msgs.length - 1].ts;
+  if (list.length) state.lastTs = list[list.length - 1].ts;
 }
 
 // 增量追加：按 id 去重（自己发的消息回声事件与发送后拉取可能撞上同一条）。
+// 只在贴底时自动滚到底；正在往上翻旧消息时不抢滚动位置。
+// DOM 上限：追加后超出 MAX_RENDERED 时从顶上裁掉最老的节点与 id，
+// 长会话里 DOM 与 renderedIds 不再无界长大。
 function appendMessages(msgs) {
   const box = $('chatBox');
   const empty = box.querySelector('[data-empty]');
   if (empty) empty.remove();
+  const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < NEAR_BOTTOM_PX;
   let added = false;
   for (const m of msgs) {
     const id = m.id;
@@ -272,7 +356,29 @@ function appendMessages(msgs) {
     if (m.ts) state.lastTs = m.ts; // 消息按时间正序，最后一条即最新水位
     added = true;
   }
-  if (added) box.scrollTop = box.scrollHeight;
+  if (added) {
+    let over = box.querySelectorAll('.msg').length - MAX_RENDERED;
+    while (over > 0) {
+      const first = box.querySelector('.msg');
+      if (!first) break;
+      if (first.dataset && first.dataset.id) state.renderedIds.delete(first.dataset.id);
+      first.remove();
+      over -= 1;
+    }
+    if (nearBottom) box.scrollTop = box.scrollHeight;
+  }
+}
+
+// 向前追加（加载更早的消息）：插到顶上，按插入高度补偿 scrollTop，
+// 用户读到的位置不动；只补 id，不动 lastTs（水位永远是最新一条）。
+function prependMessages(msgs) {
+  const box = $('chatBox');
+  const empty = box.querySelector('[data-empty]');
+  if (empty) empty.remove();
+  const beforeHeight = box.scrollHeight;
+  box.insertAdjacentHTML('afterbegin', msgs.map((m) => messageHtml(m)).join(''));
+  for (const m of msgs) if (m.id) state.renderedIds.add(m.id);
+  box.scrollTop += box.scrollHeight - beforeHeight;
 }
 
 // WS 直播事件自带 body/attachments（服务端 wsExtra），直接拼成消息对象追加。

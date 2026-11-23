@@ -159,15 +159,15 @@ function registerIpc() {
   ipcMain.handle('api:me', () => client.getMe(sessionToken()));
   ipcMain.handle('api:accounts', () => client.getAccounts());
   ipcMain.handle('api:groups', () => client.getGroups(sessionToken()));
-  ipcMain.handle('api:group-messages', (_e, { groupId, since, limit }) =>
-    client.getGroupMessages(groupId, sessionToken(), { since, limit }));
+  ipcMain.handle('api:group-messages', (_e, { groupId, since, limit, before_id }) =>
+    client.getGroupMessages(groupId, sessionToken(), { since, limit, before_id }));
   ipcMain.handle('api:send-group-message', (_e, { groupId, body, attachments }) =>
     client.sendGroupMessage(groupId, sessionToken(), body, attachments || []));
   ipcMain.handle('api:read', (_e, { groupId, seq }) =>
     client.markGroupRead(sessionToken(), groupId, seq));
   ipcMain.handle('api:dms', () => client.getDms(sessionToken()));
-  ipcMain.handle('api:dm-history', (_e, { peer, since }) =>
-    client.getDmHistory(peer, sessionToken(), { since }));
+  ipcMain.handle('api:dm-history', (_e, { peer, since, limit, before_id }) =>
+    client.getDmHistory(peer, sessionToken(), { since, limit, before_id }));
   ipcMain.handle('api:send-dm', (_e, { peer, body, attachments }) =>
     client.sendDm(peer, sessionToken(), body, attachments || []));
   ipcMain.handle('api:posts', (_e, opts) => client.getPosts(opts || {}));

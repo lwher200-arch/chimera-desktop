@@ -167,16 +167,11 @@ async function main() {
       assert.ok(del.status === 200 || del.status === 204, `删消息应 200/204，实际 ${del.status}`);
     }
     mids.length = 0;
-    // 注：服务端删消息是软删除（deleted=true，行还在），而删上传的 inUse 检查
-    // 不过滤已软删的消息，所以挂过附件的上传删不掉（400 'upload is attached'）。
-    // 这是服务端现行口径，不是本测试的问题；删不掉就留着，打印出来由外部清理。
+    // 服务端已修（2026-11-23，live f2105cc0）：删上传的 inUse 检查现在过滤
+    // 已软删的消息/帖子，删消息后再删上传应回 200/204。严格断言，不再容忍 400。
     const delUp = await fetch(API_BASE + `/api/uploads/${upId}`, { method: 'DELETE', headers: { 'X-AI-Token': TOKEN } });
-    if (delUp.status === 200 || delUp.status === 204) {
-      ok('测试消息与上传已删');
-    } else {
-      console.log(`  注：上传删不掉（HTTP ${delUp.status}，服务端软删口径），留待外部清理：CLEANUP_UPLOAD_ID=${upId}`);
-      ok('测试消息已删（上传因服务端软删口径删不掉，见注）');
-    }
+    assert.ok(delUp.status === 200 || delUp.status === 204, `删上传应 200/204，实际 ${delUp.status}：${(await delUp.text()).slice(0, 200)}`);
+    ok('测试消息与上传已删');
 
     console.log(`\nPASS: ${passed} 项全过`);
   } finally {
