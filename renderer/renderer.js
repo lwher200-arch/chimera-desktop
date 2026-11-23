@@ -606,7 +606,7 @@ async function refreshNodePanel() {
       <div class="stat-card"><div class="stat-label">运行时长</div><div class="stat-value">${st.uptimeSec}s</div></div>
       <div class="stat-card"><div class="stat-label">本地副本头</div><div class="stat-value">${st.headers} 条</div></div>
       <div class="stat-card"><div class="stat-label">已知 peer</div><div class="stat-value">${st.peers}（在线 ${st.peersOnline}）</div></div>
-      <div class="stat-card"><div class="stat-label">上次同步</div><div class="stat-value">${esc(st.lastSyncAt || '—')}（${st.lastSyncOk === false ? '失败' : '正常'}）</div></div>
+      <div class="stat-card"><div class="stat-label">上次同步</div><div class="stat-value">${esc(fmtTime(st.lastSyncAt) || '—')}（${st.lastSyncOk === false ? '失败' : '正常'}）</div></div>
       <div class="stat-card"><div class="stat-label">论坛身份</div><div class="stat-value">${st.hasForumIdentity ? '已绑定' : '未绑定（仅本地跑）'}</div></div>`;
   } catch (err) {
     $('nodeStateText').textContent = '节点状态读取失败：' + (err.message || err);
