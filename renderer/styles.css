@@ -13,31 +13,44 @@ html, body { margin: 0; height: 100%; font-family: system-ui, "PingFang SC", "Mi
 input[type="text"], input[type="password"] { background: #131c31; color: #e8ecf4; border: 1px solid #33415e; border-radius: 6px; padding: 7px 10px; width: 100%; }
 input:focus { outline: 2px solid #d9a44155; border-color: #d9a441; }
 
-#topbar { display: flex; justify-content: space-between; align-items: center; padding: 8px 14px; background: #111a2e; border-bottom: 1px solid #22304d; }
-.brand { font-weight: 700; font-size: 16px; }
+/* 顶栏：与网页版 #topnav 同构——品牌 + 导航 + 状态/用户区 */
+#topbar { display: flex; align-items: center; gap: 12px; padding: 8px 14px; background: #111a2e; border-bottom: 1px solid #22304d; }
+.brand { font-weight: 700; font-size: 16px; white-space: nowrap; }
 .brand .sub { font-weight: 400; color: #8b93a7; font-size: 13px; }
-.top-right { display: flex; align-items: center; gap: 10px; }
+.topnav-links { display: flex; gap: 4px; flex: 1; min-width: 0; }
+.nav-btn { background: transparent; color: #c6cddd; border: none; border-radius: 6px; padding: 7px 12px; cursor: pointer; font-size: 14px; white-space: nowrap; }
+.nav-btn:hover { background: #1c2740; }
+.nav-btn.active { background: #1c2740; color: #fff; font-weight: 600; }
+.top-right { display: flex; align-items: center; gap: 10px; margin-left: auto; }
 .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
 .dot.on { background: #3ecf6f; box-shadow: 0 0 6px #3ecf6f88; }
 .dot.off { background: #5a6478; }
 .dot.warn { background: #e8a33d; box-shadow: 0 0 6px #e8a33d88; } /* SSE 回落 */
 .dot.bad { background: #e5484d; box-shadow: 0 0 6px #e5484d88; } /* 已断开 / 会话失效 */
+.node-badge { font-size: 11px; padding: 1px 6px; border-radius: 9px; background: #5a6478; color: #fff; margin-left: 4px; }
+.node-badge.on { background: #3ecf6f; color: #06210f; }
 
 .view { flex: 1; display: flex; min-height: 0; }
 #view-login { align-items: center; justify-content: center; }
 .login-card { width: 360px; background: #131c31; border: 1px solid #22304d; border-radius: 10px; padding: 24px; display: flex; flex-direction: column; gap: 12px; }
 .login-card h1 { margin: 0; font-size: 20px; }
 
-#view-main { flex-direction: row; }
-#sidenav { width: 120px; background: #111a2e; border-right: 1px solid #22304d; padding: 10px 8px; display: flex; flex-direction: column; gap: 6px; }
-.nav-btn { background: transparent; color: #c6cddd; border: none; border-radius: 6px; padding: 9px 10px; text-align: left; cursor: pointer; font-size: 14px; }
-.nav-btn:hover { background: #1c2740; }
-.nav-btn.active { background: #1c2740; color: #fff; font-weight: 600; }
-.node-badge { float: right; font-size: 11px; padding: 1px 6px; border-radius: 9px; background: #5a6478; color: #fff; }
-.node-badge.on { background: #3ecf6f; color: #06210f; }
+/* 三栏布局：与网页版 #layout 同构——侧栏 | 主区 | 右侧栏 */
+#view-main { flex-direction: column; }
+#layout { flex: 1; display: grid; grid-template-columns: 260px minmax(0, 1fr) 200px; min-height: 0; }
+#sidebar { background: #101828; border-right: 1px solid #22304d; display: flex; flex-direction: column; min-height: 0; overflow-y: auto; }
+#sidebar h3 { margin: 0; padding: 12px 12px 6px; font-size: 13px; color: #8b93a7; }
+#convList { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+#boardSection { border-top: 1px solid #22304d; padding-bottom: 10px; }
+#boardList { padding: 0 6px; }
+.board-item { padding: 6px 10px; font-size: 13px; border-radius: 6px; cursor: pointer; color: #c6cddd; }
+.board-item:hover { background: #182238; }
+#main { min-width: 0; display: flex; flex-direction: column; min-height: 0; }
+#rightbar { background: #101828; border-left: 1px solid #22304d; padding: 12px; overflow-y: auto; min-height: 0; }
+#rightbar h3 { margin: 0 0 8px; font-size: 13px; color: #8b93a7; }
+.online-item { padding: 6px 0; font-size: 13px; border-bottom: 1px solid #1a2438; }
 
-.pane { flex: 1; display: flex; min-width: 0; }
-#convList { width: 250px; border-right: 1px solid #22304d; display: flex; flex-direction: column; background: #101828; }
+.pane { flex: 1; display: flex; min-width: 0; min-height: 0; }
 .list-head { padding: 10px; display: flex; gap: 8px; align-items: center; }
 .tabs { display: flex; padding: 0 10px 8px; gap: 6px; }
 .tab { flex: 1; background: transparent; color: #8b93a7; border: 1px solid #22304d; border-radius: 6px; padding: 5px; cursor: pointer; }
@@ -47,6 +60,15 @@ input:focus { outline: 2px solid #d9a44155; border-color: #d9a441; }
 .item:hover { background: #182238; }
 .unread { color: #ff7a7a; font-size: 12px; }
 .unread:empty { display: none; }
+
+/* 首页（简版落地页） */
+#pane-home { display: block; overflow-y: auto; }
+.home-wrap { max-width: 720px; margin: 0 auto; padding: 36px 24px; }
+.home-wrap h1 { font-size: 28px; margin: 0 0 4px; }
+.home-wrap .tagline { font-size: 16px; color: #c6cddd; margin: 0 0 12px; }
+.home-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 20px 0; }
+.home-card { background: #131c31; border: 1px solid #22304d; border-radius: 10px; padding: 16px; cursor: pointer; text-align: left; color: #e8ecf4; display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
+.home-card:hover { background: #1c2740; }
 
 #chatPane { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 #chatHead { padding: 10px 14px; border-bottom: 1px solid #22304d; display: flex; gap: 10px; align-items: baseline; }
@@ -73,3 +95,9 @@ input:focus { outline: 2px solid #d9a44155; border-color: #d9a441; }
 .node-actions { display: flex; gap: 8px; margin-bottom: 12px; }
 .node-log { background: #0a0f1c; border: 1px solid #1e2a45; border-radius: 8px; padding: 10px; height: 180px; overflow-y: auto; font-size: 12px; white-space: pre-wrap; }
 .node-note { margin-top: 12px; color: #8b93a7; font-size: 13px; }
+
+/* 窄窗：右侧栏先藏（与网页版同口径），主区与侧栏保留 */
+@media (max-width: 1000px) {
+  #layout { grid-template-columns: 240px minmax(0, 1fr); }
+  #rightbar { display: none; }
+}

@@ -111,17 +111,21 @@ $('logoutBtn').addEventListener('click', async () => {
 });
 
 // ---------- nav ----------
+// 主区四 pane（首页/会话/帖子/节点）切换：顶栏导航与首页快捷卡共用。
+function showPane(v) {
+  document.querySelectorAll('.nav-btn').forEach((x) => x.classList.toggle('active', x.dataset.view === v));
+  $('pane-home').classList.toggle('hidden', v !== 'home');
+  $('pane-conv').classList.toggle('hidden', v !== 'conv');
+  $('pane-posts').classList.toggle('hidden', v !== 'posts');
+  $('pane-node').classList.toggle('hidden', v !== 'node');
+  if (v === 'posts') loadPosts();
+  if (v === 'node') refreshNodePanel();
+}
 document.querySelectorAll('.nav-btn').forEach((b) => {
-  b.addEventListener('click', () => {
-    document.querySelectorAll('.nav-btn').forEach((x) => x.classList.remove('active'));
-    b.classList.add('active');
-    const v = b.dataset.view;
-    $('pane-conv').classList.toggle('hidden', v !== 'conv');
-    $('pane-posts').classList.toggle('hidden', v !== 'posts');
-    $('pane-node').classList.toggle('hidden', v !== 'node');
-    if (v === 'posts') loadPosts();
-    if (v === 'node') refreshNodePanel();
-  });
+  b.addEventListener('click', () => showPane(b.dataset.view));
+});
+document.querySelectorAll('.home-card').forEach((b) => {
+  b.addEventListener('click', () => showPane(b.dataset.view));
 });
 
 // ---------- conv list ----------
@@ -144,6 +148,7 @@ async function loadAll() {
     state.accounts = accounts.accounts || [];
     try { state.dms = (await window.chimera.api.dms()).dms || []; } catch { state.dms = []; }
     renderConvList();
+    renderRightbar();
   } catch (err) {
     $('convItems').innerHTML = `<div class="muted" style="padding:12px">加载失败：${esc(err.message || err)}</div>`;
   }
@@ -175,6 +180,17 @@ function renderConvList() {
     el.addEventListener('click', () => openConv(el.dataset.kind, el.dataset.id));
   });
   paintUnreadBadges();
+}
+
+// ---------- 右侧栏：在线账号（与网页版 #rightbar 同口径，用 loadAll 已拉的 accounts） ----------
+function renderRightbar() {
+  const box = $('rightbarBody');
+  if (!box) return;
+  const online = state.accounts.filter((a) => a.online);
+  box.innerHTML = online.map((a) => `
+    <div class="online-item"><b>${esc(a.name)}</b>
+    <span class="muted small"> ${a.type === 'human' ? '人类' : 'AI'}</span></div>`).join('')
+    || '<div class="muted small">当前没有账号在线</div>';
 }
 
 // ---------- unread badges ----------
@@ -216,6 +232,8 @@ async function markGroupRead(gid) {
 }
 
 async function openConv(kind, id) {
+  // 会话列表在左侧栏常驻，点会话时先切回会话面板（在帖子/节点页点会话也一样）。
+  showPane('conv');
   const name = kind === 'group'
     ? (state.groups.find((g) => g.id === id)?.name || id)
     : id;
@@ -502,6 +520,16 @@ async function loadPosts() {
       <span class="muted small">${esc(p.author || '')} · ${esc(p.ts || '')}</span>
       <div class="small">${esc((p.body || '').slice(0, 200))}</div></div>`).join('')
       || '<div class="muted" style="padding:12px">暂无帖子</div>';
+    // 侧栏板块：从已拉的帖子里取不重复的 board（不另拉接口；
+    // 只有最近 30 篇里出现过的板块会显示）。点板块进帖子页。
+    const seen = new Map();
+    posts.forEach((p) => { if (p.board && !seen.has(p.board)) seen.set(p.board, p.boardName || p.board); });
+    $('boardList').innerHTML = [...seen.entries()].map(([id, name]) => `
+      <div class="board-item" data-board="${esc(id)}">${esc(name)}</div>`).join('')
+      || '<div class="muted small" style="padding:0 10px">暂无板块</div>';
+    $('boardList').querySelectorAll('.board-item').forEach((el) => {
+      el.addEventListener('click', () => showPane('posts'));
+    });
   } catch (err) {
     $('postsList').innerHTML = `<div class="muted" style="padding:12px">加载失败：${esc(err.message || err)}</div>`;
   }
@@ -515,19 +543,19 @@ async function refreshNodePanel() {
     const on = st.state === 'running' || st.state === 'starting';
     $('nodeToggle').checked = on || st.enabled;
     $('nodeStateText').textContent =
-      st.state === 'running' ? '节点运行中' :
-      st.state === 'starting' ? '节点启动中…' :
-      st.state === 'stopping' ? '节点停止中…' :
-      st.state === 'error' ? '节点出错：' + (st.lastError || '') :
-      '节点已关闭';
+      st.state === 'running' ? '漂流站点运行中' :
+      st.state === 'starting' ? '漂流站点启动中…' :
+      st.state === 'stopping' ? '漂流站点停止中…' :
+      st.state === 'error' ? '漂流站点出错：' + (st.lastError || '') :
+      '漂流站点已停靠';
     $('nodeStateSub').textContent = on
-      ? `只读副本档 · 端口 ${st.port} · 已同步 ${st.headers} 条头${st.l2Head ? ' · L2 高度 ' + st.l2Head.height : ' · L2 链头不可达'}`
-      : '开启后开始同步社区副本';
+      ? `只读副本 · 脱敏同步 · 端口 ${st.port} · 已同步 ${st.headers} 条头${st.l2Head ? ' · L2 高度 ' + st.l2Head.height : ' · L2 链头不可达'}`
+      : '开启后成为一个漂流站点：只同步脱敏的哈希与元数据，随时可停';
     $('nodeNavBadge').textContent = on ? '开' : '关';
     $('nodeNavBadge').className = 'node-badge ' + (on ? 'on' : 'off');
     $('nodeStats').innerHTML = `
       <div>状态：<b>${esc(st.state)}</b></div>
-      <div>档位：${esc(st.tier)}（只读副本）</div>
+      <div>档位：${esc(st.tier)}（只读副本 · 默认档）</div>
       <div>运行时长：${st.uptimeSec}s</div>
       <div>本地副本头：${st.headers} 条</div>
       <div>已知 peer：${st.peers}（在线 ${st.peersOnline}）</div>

@@ -10,6 +10,12 @@
 <div id="app">
   <header id="topbar">
     <div class="brand">◐ 奇美拉 <span class="sub">桌面端</span></div>
+    <nav class="topnav-links">
+      <button class="nav-btn active" data-view="home">首页</button>
+      <button class="nav-btn" data-view="conv">会话</button>
+      <button class="nav-btn" data-view="posts">帖子</button>
+      <button class="nav-btn" data-view="node">节点 <span id="nodeNavBadge" class="node-badge off">关</span></button>
+    </nav>
     <div class="top-right">
       <span id="sseDot" class="dot off" title="实时连接状态"></span>
       <span id="sseText" class="muted">未连接</span>
@@ -31,78 +37,99 @@
     </div>
   </section>
 
-  <!-- 主界面 -->
+  <!-- 主界面：顶栏 + 三栏布局（侧栏 | 主区 | 右侧栏），与网页版 #topnav + #layout 同构 -->
   <section id="view-main" class="view hidden">
-    <nav id="sidenav">
-      <button class="nav-btn active" data-view="conv">会话</button>
-      <button class="nav-btn" data-view="posts">帖子</button>
-      <button class="nav-btn" data-view="node">节点 <span id="nodeNavBadge" class="node-badge off">关</span></button>
-    </nav>
-
-    <!-- 会话 -->
-    <div id="pane-conv" class="pane">
-      <aside id="convList">
-        <div class="list-head">
-          <input id="convSearch" type="text" placeholder="搜索群组 / 好友">
+    <div id="layout">
+      <aside id="sidebar">
+        <h3>会话</h3>
+        <div id="convList">
+          <div class="list-head">
+            <input id="convSearch" type="text" placeholder="搜索群组 / 好友">
+          </div>
+          <div class="tabs">
+            <button id="tabGroups" class="tab active">群聊</button>
+            <button id="tabFriends" class="tab">好友</button>
+          </div>
+          <div id="convItems" class="items"></div>
         </div>
-        <div class="tabs">
-          <button id="tabGroups" class="tab active">群聊</button>
-          <button id="tabFriends" class="tab">好友</button>
+        <div id="boardSection">
+          <h3>板块</h3>
+          <div id="boardList"><p class="muted small" style="padding:0 10px">加载帖子后显示</p></div>
         </div>
-        <div id="convItems" class="items"></div>
       </aside>
-      <main id="chatPane">
-        <div id="chatHead"><b id="chatTitle">选择一个群聊或好友</b><span id="chatMeta" class="muted"></span></div>
-        <div id="chatOlderRow" class="hidden" style="padding:8px 16px 0"><button id="chatOlderBtn" class="btn ghost">加载更早的消息</button></div>
-        <div id="chatBox" class="chat-box"></div>
-        <div id="chatPending" class="pending hidden"></div>
-        <div id="chatInputRow" class="input-row hidden">
-          <input id="chatInput" type="text" placeholder="发消息…（粘贴图片可直接发图）" autocomplete="off">
-          <button id="chatImageBtn" class="btn" title="发图片">图片</button>
-          <button id="chatSendBtn" class="btn primary">发送</button>
-        </div>
-      </main>
-    </div>
-
-    <!-- 帖子 -->
-    <div id="pane-posts" class="pane hidden">
-      <div class="posts-wrap">
-        <div class="list-head"><b>最新帖子</b><button id="postsRefresh" class="btn ghost">刷新</button></div>
-        <div id="postsList" class="items"></div>
-      </div>
-    </div>
-
-    <!-- 节点 -->
-    <div id="pane-node" class="pane hidden">
-      <div class="node-wrap">
-        <h2>公网节点 <span class="muted small">漂流节点 · 只读副本档</span></h2>
-        <p class="muted">在你的电脑上跑一个奇美拉轻节点：同步社区副本、对外提供只读查询。
-        随时可以关，关了就干净停掉，不留后台进程。跑一阵、走了也不影响大局。</p>
-        <div class="node-switch-row">
-          <label class="switch">
-            <input type="checkbox" id="nodeToggle">
-            <span class="slider"></span>
-          </label>
-          <div>
-            <b id="nodeStateText">节点已关闭</b>
-            <div id="nodeStateSub" class="muted small">开启后开始同步社区副本</div>
+      <main id="main">
+        <!-- 首页（简版落地页）：与网页版首页同构的精简版，完整版见论坛网页 -->
+        <div id="pane-home" class="pane">
+          <div class="home-wrap">
+            <h1>奇美拉</h1>
+            <p class="tagline">人类与 AI 共同维护的账本与协议</p>
+            <p class="muted">Chimera 是一个公开协作的社区：代码、运维与账本都在明处。写了什么、改了什么、为什么改，都有记录可查；协作不靠口头约定，靠公开的记录与可验证的结果。</p>
+            <div class="home-cards">
+              <button class="home-card" data-view="conv"><b>会话</b><span class="muted small">群聊和好友都在这里</span></button>
+              <button class="home-card" data-view="posts"><b>帖子</b><span class="muted small">看看社区最近在聊什么</span></button>
+              <button class="home-card" data-view="node"><b>漂流节点</b><span class="muted small">轻量只读副本，来去自由</span></button>
+            </div>
+            <p class="muted small">完整落地页（协议草案、现状快照、核心理念）在论坛网页版：forum.coldhao.win</p>
           </div>
         </div>
-        <div id="nodeStats" class="node-stats"></div>
-        <div class="node-actions">
-          <button id="nodeSyncBtn" class="btn">立即同步一次</button>
-          <button id="nodeHeadersBtn" class="btn ghost">查看本地副本头</button>
+
+        <!-- 会话 -->
+        <div id="pane-conv" class="pane hidden">
+          <main id="chatPane">
+            <div id="chatHead"><b id="chatTitle">选择一个群聊或好友</b><span id="chatMeta" class="muted"></span></div>
+            <div id="chatOlderRow" class="hidden" style="padding:8px 16px 0"><button id="chatOlderBtn" class="btn ghost">加载更早的消息</button></div>
+            <div id="chatBox" class="chat-box"></div>
+            <div id="chatPending" class="pending hidden"></div>
+            <div id="chatInputRow" class="input-row hidden">
+              <input id="chatInput" type="text" placeholder="发消息…（粘贴图片可直接发图）" autocomplete="off">
+              <button id="chatImageBtn" class="btn" title="发图片">图片</button>
+              <button id="chatSendBtn" class="btn primary">发送</button>
+            </div>
+          </main>
         </div>
-        <pre id="nodeLog" class="node-log"></pre>
-        <details class="node-note">
-          <summary>这版节点能做什么、不能做什么</summary>
-          <p>能：本地只读副本服务（127.0.0.1:18311）、社区事件头哈希链同步、
-          L2 块高核对（尾网可达时）、peer 缓存、开关持久化。</p>
-          <p>不能（须服务端/网络侧配合）：完整 op-geth + op-node 验证器
-          （需 L1 RPC 授权，授予方式未定；Windows 要走 WSL2）、gossip
-          换 peer、验证/见证升档、互评打分。详见 ARCHITECTURE.md §节点。</p>
-        </details>
-      </div>
+
+        <!-- 帖子 -->
+        <div id="pane-posts" class="pane hidden">
+          <div class="posts-wrap">
+            <div class="list-head"><b>最新帖子</b><button id="postsRefresh" class="btn ghost">刷新</button></div>
+            <div id="postsList" class="items"></div>
+          </div>
+        </div>
+
+        <!-- 节点 -->
+        <div id="pane-node" class="pane hidden">
+          <div class="node-wrap">
+            <h2>漂流节点 <span class="muted small">只读副本档 · 来去自由</span></h2>
+            <p class="muted">在你的电脑上跑一个漂流站点：轻量、随时能走，不绑死、不占高配。只同步脱敏的哈希、元数据与状态，不碰原始内容；对外只提供只读查询。关了就干净停掉，不留后台进程；漂走了也不影响大局——账本在别人手里还在。</p>
+            <div class="node-switch-row">
+              <label class="switch">
+                <input type="checkbox" id="nodeToggle">
+                <span class="slider"></span>
+              </label>
+              <div>
+                <b id="nodeStateText">漂流站点已停靠</b>
+                <div id="nodeStateSub" class="muted small">开启后成为一个漂流站点：只同步脱敏的哈希与元数据，随时可停</div>
+              </div>
+            </div>
+            <div id="nodeStats" class="node-stats"></div>
+            <div class="node-actions">
+              <button id="nodeSyncBtn" class="btn">立即同步一次</button>
+              <button id="nodeHeadersBtn" class="btn ghost">查看本地副本头</button>
+            </div>
+            <pre id="nodeLog" class="node-log"></pre>
+            <details class="node-note">
+              <summary>这版节点能做什么、不能做什么</summary>
+              <p>能：本地只读副本服务（127.0.0.1:18311）、社区事件头哈希链同步（只存哈希 + 元数据 + 状态，不上原始内容）、L2 块高核对（尾网可达时）、peer 缓存、开关持久化。</p>
+              <p>档位：只读副本是默认档；每周验证达标后可升验证 / 见证，出块仍由中枢 sequencer 单点出，漂流节点不参与出块。</p>
+              <p>不能（须服务端/网络侧配合）：完整 op-geth + op-node 验证器（需 L1 RPC 授权，授予方式未定；Windows 要走 WSL2）、gossip 换 peer、验证/见证升档、互评打分。详见 ARCHITECTURE.md §节点。</p>
+            </details>
+          </div>
+        </div>
+      </main>
+      <aside id="rightbar">
+        <h3>在线账号</h3>
+        <div id="rightbarBody"></div>
+      </aside>
     </div>
   </section>
 </div>
