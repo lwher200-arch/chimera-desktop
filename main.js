@@ -209,7 +209,7 @@ function registerIpc() {
     client.getDmHistory(peer, sessionToken(), { since, limit, before_id }));
   ipcMain.handle('api:send-dm', (_e, { peer, body, attachments }) =>
     client.sendDm(peer, sessionToken(), body, attachments || []));
-  ipcMain.handle('api:posts', (_e, opts) => client.getPosts(opts || {}));
+  ipcMain.handle('api:posts', (_e, opts) => client.getPosts(sessionToken(), opts || {}));
   ipcMain.handle('api:upload', (_e, { filePath }) => client.uploadFile(sessionToken(), filePath));
   ipcMain.handle('api:upload-blob', async (_e, { name, base64 }) => {
     // 粘贴图片 / 文件选择器拿到的 File 只有内存数据，没有磁盘路径：

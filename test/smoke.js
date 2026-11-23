@@ -370,7 +370,14 @@ async function main() {
       return m[0];
     };
     const escFn = new Function(`${extractFn('esc')}; return esc;`)();
-    const messageHtmlFn = new Function('esc', `${extractFn('messageHtml')}; return messageHtml;`)(escFn);
+    // messageHtml 自 v0.3.0 起还用 state.me（判自己的消息）、avatarHtml、fmtTime：
+    // 抽出来时一并注入。§6 的假 state 从不设 me（没有一条是自己的消息），
+    // 故这里传一个固定的 { me: null }，不随下面 state = freshState() 的重绑而变。
+    const avatarClassFn = new Function(`${extractFn('avatarClass')}; return avatarClass;`)();
+    const avatarInitialFn = new Function(`${extractFn('avatarInitial')}; return avatarInitial;`)();
+    const avatarHtmlFn = new Function('avatarClass', 'avatarInitial', 'esc', `${extractFn('avatarHtml')}; return avatarHtml;`)(avatarClassFn, avatarInitialFn, escFn);
+    const fmtTimeFn = new Function(`${extractFn('fmtTime')}; return fmtTime;`)();
+    const messageHtmlFn = new Function('esc', 'state', 'avatarHtml', 'fmtTime', `${extractFn('messageHtml')}; return messageHtml;`)(escFn, { me: null }, avatarHtmlFn, fmtTimeFn);
 
     function makeEl(cls, id, parent) {
       return {

@@ -49,6 +49,43 @@ function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+// 视觉小件：头像按名字哈希取 6 档渐变，时间只显示 HH:MM / MM-DD HH:MM。
+function avatarClass(name) {
+  let h = 0; const s = String(name || '?');
+  for (const ch of s) h = (h * 31 + ch.codePointAt(0)) >>> 0;
+  return 'av-' + (h % 6);
+}
+function avatarInitial(name) {
+  const s = String(name || '?').trim();
+  return s ? s[0].toUpperCase() : '?';
+}
+function avatarHtml(name, extra) {
+  return `<span class="avatar ${extra || ''} ${avatarClass(name)}">${esc(avatarInitial(name))}</span>`;
+}
+function fmtTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return String(ts);
+  const now = new Date();
+  const hhmm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  const sameDay = d.toDateString() === now.toDateString();
+  if (sameDay) return hhmm;
+  return (d.getMonth() + 1) + '-' + d.getDate() + ' ' + hhmm;
+}
+function setMeChip() {
+  const av = $('whoamiAvatar'); const chip = $('whoami');
+  if (!av || !chip) return;
+  if (state.me) {
+    av.textContent = avatarInitial(state.me.username);
+    av.className = 'avatar avatar-sm ' + avatarClass(state.me.username);
+    av.classList.remove('hidden');
+    chip.classList.remove('hidden');
+  } else {
+    av.classList.add('hidden');
+    chip.classList.add('hidden');
+  }
+}
+
 function show(view) {
   $('view-login').classList.toggle('hidden', view !== 'login');
   $('view-main').classList.toggle('hidden', view !== 'main');
@@ -76,6 +113,7 @@ async function boot() {
   if (sess) {
     state.me = { username: sess.username };
     $('whoami').textContent = sess.username;
+    setMeChip();
     $('logoutBtn').classList.remove('hidden');
     show('main');
     await loadAll();
@@ -93,6 +131,7 @@ $('loginBtn').addEventListener('click', async () => {
     const r = await window.chimera.session.login(username, password);
     state.me = { username: r.username };
     $('whoami').textContent = r.username;
+    setMeChip();
     $('logoutBtn').classList.remove('hidden');
     show('main');
     await loadAll();
@@ -106,6 +145,7 @@ $('logoutBtn').addEventListener('click', async () => {
   await window.chimera.session.logout();
   state.me = null; state.open = null;
   $('whoami').textContent = '';
+  setMeChip();
   $('logoutBtn').classList.add('hidden');
   show('login');
 });
@@ -161,23 +201,25 @@ function renderConvList() {
     const list = state.groups.filter((g) => !q || (g.name || '').toLowerCase().includes(q));
     box.innerHTML = list.map((g) => `
       <div class="item" data-kind="group" data-id="${esc(g.id)}">
-        <b>${esc(g.name)}</b>
-        <span class="muted small">${g.kind === 'chat' ? '聊天群' : esc(g.kind || '')}${g.private ? ' · 私密' : ''}</span>
-        <span class="unread" data-unread="${esc(g.id)}"></span>
-      </div>`).join('') || '<div class="muted" style="padding:12px">没有群组</div>';
+        ${avatarHtml(g.name)}
+        <div class="item-main"><div class="item-name"><b>${esc(g.name)}</b><span class="unread" data-unread="${esc(g.id)}"></span></div>
+        <span class="item-sub">${g.kind === 'chat' ? '聊天群' : esc(g.kind || '')}${g.private ? ' · 私密' : ''}</span></div>
+      </div>`).join('') || '<div class="empty-note">没有群组</div>';
   } else {
     const humans = state.accounts.filter((a) => a.type === 'human' && a.name !== state.me?.username);
     const ais = state.accounts.filter((a) => a.type === 'ai');
     const row = (a) => `
       <div class="item" data-kind="dm" data-id="${esc(a.name)}">
-        <b>${esc(a.name)}</b>
-        <span class="muted small">${a.type === 'human' ? '人类' : 'AI'}${a.online ? ' · 在线' : ''}</span>
+        ${avatarHtml(a.name)}
+        <div class="item-main"><div class="item-name"><b>${esc(a.name)}</b></div>
+        <span class="item-sub">${a.type === 'human' ? '人类' : 'AI'}${a.online ? ' · 在线' : ''}</span></div>
       </div>`;
     const all = [...humans, ...ais].filter((a) => !q || (a.name || '').toLowerCase().includes(q));
-    box.innerHTML = (all.map(row).join('')) || '<div class="muted" style="padding:12px">没有好友</div>';
+    box.innerHTML = (all.map(row).join('')) || '<div class="empty-note">没有好友</div>';
   }
   box.querySelectorAll('.item').forEach((el) => {
     el.addEventListener('click', () => openConv(el.dataset.kind, el.dataset.id));
+    if (state.open) el.classList.toggle('active', el.dataset.kind === state.open.kind && el.dataset.id === state.open.id);
   });
   paintUnreadBadges();
 }
@@ -243,6 +285,11 @@ async function openConv(kind, id) {
   state.hasMoreOlder = false;
   state.loadingOlder = false;
   syncOlderButton();
+  const ca = $('chatAvatar');
+  if (ca) { ca.textContent = avatarInitial(name); ca.className = 'avatar ' + avatarClass(name); ca.classList.remove('hidden'); }
+  document.querySelectorAll('#convItems .item').forEach((el) => {
+    el.classList.toggle('active', el.dataset.kind === kind && el.dataset.id === id);
+  });
   $('chatTitle').textContent = name;
   $('chatMeta').textContent = kind === 'group' ? '群聊' : '私聊';
   $('chatInputRow').classList.remove('hidden');
@@ -349,10 +396,10 @@ async function fetchNewMessages(fullFallback) {
 function messageHtml(m) {
   const atts = (m.attachments || []).map((a) =>
     `<a href="${esc(a.url)}" target="_blank"><img class="thumb" src="${esc(a.url)}" alt="图片"></a>`).join('');
+  const author = m.author || m.from || '?';
+  const mine = !!state.me && author === state.me.username;
   // data-id 供窗口裁剪与向前翻页（before_id）找最老一条用。
-  return `<div class="msg" data-id="${esc(m.id || '')}"><b>${esc(m.author || m.from || '?')}</b>
-    <span class="muted small">${esc(m.ts || '')}</span>
-    <div>${esc(m.body || '')}</div>${atts}</div>`;
+  return `<div class="msg${mine ? ' mine' : ''}" data-id="${esc(m.id || '')}">${avatarHtml(author)}<div class="bubble"><div class="msg-head"><b>${esc(author)}</b><time>${esc(fmtTime(m.ts))}</time></div><div class="msg-body">${esc(m.body || '')}</div>${atts}</div></div>`;
 }
 
 function renderMessages(msgs) {
@@ -361,7 +408,7 @@ function renderMessages(msgs) {
   // 其余算“更早的消息”，顶上按钮可翻。
   const list = msgs.length > MAX_RENDERED ? msgs.slice(msgs.length - MAX_RENDERED) : msgs;
   if (msgs.length > MAX_RENDERED) state.hasMoreOlder = true;
-  box.innerHTML = list.map((m) => messageHtml(m)).join('') || '<div class="muted" data-empty="1">暂无消息</div>';
+  box.innerHTML = list.map((m) => messageHtml(m)).join('') || '<div class="chat-empty" data-empty="1"><img src="assets/brand.png" alt="奇美拉"><b>暂无消息</b><span>发第一条消息，打个招呼吧。</span></div>';
   state.renderedIds = new Set(list.map((m) => m.id).filter(Boolean));
   box.scrollTop = box.scrollHeight;
   if (list.length) state.lastTs = list[list.length - 1].ts;
@@ -516,10 +563,10 @@ async function loadPosts() {
     const data = await window.chimera.api.posts({ limit: 30 });
     const posts = data.posts || [];
     $('postsList').innerHTML = posts.map((p) => `
-      <div class="item"><b>${esc(p.title || '(无标题)')}</b>
-      <span class="muted small">${esc(p.author || '')} · ${esc(p.ts || '')}</span>
-      <div class="small">${esc((p.body || '').slice(0, 200))}</div></div>`).join('')
-      || '<div class="muted" style="padding:12px">暂无帖子</div>';
+      <div class="post-card"><b>${esc(p.title || '(无标题)')}</b>
+      <div class="post-meta">${avatarHtml(p.author || '?', 'avatar-sm')}<span>${esc(p.author || '')} · ${esc(fmtTime(p.ts))}</span></div>
+      <div class="post-excerpt">${esc((p.body || '').slice(0, 200))}</div></div>`).join('')
+      || '<div class="empty-note">暂无帖子</div>';
     // 侧栏板块：从已拉的帖子里取不重复的 board（不另拉接口；
     // 只有最近 30 篇里出现过的板块会显示）。点板块进帖子页。
     const seen = new Map();
@@ -549,18 +596,18 @@ async function refreshNodePanel() {
       st.state === 'error' ? '漂流站点出错：' + (st.lastError || '') :
       '漂流站点已停靠';
     $('nodeStateSub').textContent = on
-      ? `只读副本 · 脱敏同步 · 端口 ${st.port} · 已同步 ${st.headers} 条头${st.l2Head ? ' · L2 高度 ' + st.l2Head.height : ' · L2 链头不可达'}`
+      ? `同步副本 · 脱敏同步 · 端口 ${st.port} · 已同步 ${st.headers} 条头${st.l2Head ? ' · L2 高度 ' + st.l2Head.height : ' · L2 链头不可达'} · 上传接入中`
       : '开启后成为一个漂流站点：只同步脱敏的哈希与元数据，随时可停';
     $('nodeNavBadge').textContent = on ? '开' : '关';
     $('nodeNavBadge').className = 'node-badge ' + (on ? 'on' : 'off');
     $('nodeStats').innerHTML = `
-      <div>状态：<b>${esc(st.state)}</b></div>
-      <div>档位：${esc(st.tier)}（只读副本 · 默认档）</div>
-      <div>运行时长：${st.uptimeSec}s</div>
-      <div>本地副本头：${st.headers} 条</div>
-      <div>已知 peer：${st.peers}（在线 ${st.peersOnline}）</div>
-      <div>上次同步：${esc(st.lastSyncAt || '—')}（${st.lastSyncOk === false ? '失败' : '正常'}）</div>
-      <div>论坛身份：${st.hasForumIdentity ? '已绑定' : '未绑定（仅本地跑）'}</div>`;
+      <div class="stat-card"><div class="stat-label">状态</div><div class="stat-value">${esc(st.state)}</div></div>
+      <div class="stat-card"><div class="stat-label">档位</div><div class="stat-value">${esc(st.tier === 'read-only' ? '同步副本' : st.tier)}</div></div>
+      <div class="stat-card"><div class="stat-label">运行时长</div><div class="stat-value">${st.uptimeSec}s</div></div>
+      <div class="stat-card"><div class="stat-label">本地副本头</div><div class="stat-value">${st.headers} 条</div></div>
+      <div class="stat-card"><div class="stat-label">已知 peer</div><div class="stat-value">${st.peers}（在线 ${st.peersOnline}）</div></div>
+      <div class="stat-card"><div class="stat-label">上次同步</div><div class="stat-value">${esc(st.lastSyncAt || '—')}（${st.lastSyncOk === false ? '失败' : '正常'}）</div></div>
+      <div class="stat-card"><div class="stat-label">论坛身份</div><div class="stat-value">${st.hasForumIdentity ? '已绑定' : '未绑定（仅本地跑）'}</div></div>`;
   } catch (err) {
     $('nodeStateText').textContent = '节点状态读取失败：' + (err.message || err);
   }
