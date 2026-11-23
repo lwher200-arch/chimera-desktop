@@ -49,6 +49,104 @@ function startMockSeed() {
   });
 }
 
+// Mock 论坛（仅 §3b 节点上传测试用）：/api/health + /api/node/headers
+// （按真实服务端口径验链：401/403/409/400 + ack）+ /api/heartbeat +
+// /api/stream（SSE：hello 后发 seq 101 再跳到 104，供 gap 测试）。
+// 只有 token 'test-node-token' 是节点身份；'test-ai-token' 是 AI 账号（403）。
+// state 暴露出来供测试断言与预置（setNodeState 模拟服务端超前）。
+function startMockForum() {
+  const state = {
+    node: { lastSeq: 0, lastHash: '0'.repeat(64), received: 0, heads: [] },
+    uploads: [], // 每次成功上传的 batch（headers 数组）
+    heartbeats: 0,
+    failNextUpload: 0, // >0 时下几次上传回 500（重试测试用）
+  };
+  const canonical = (o) => JSON.stringify(o, Object.keys(o).sort());
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://127.0.0.1');
+    if (url.pathname === '/api/stream') {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+      res.write('retry: 3000\n\n');
+      const frame = (id, event, data) => `id: ${id}\nevent: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+      res.write(frame(100, 'hello', { seq: 100, time: new Date().toISOString() }));
+      res.write(frame(101, 'group_message', { seq: 101, type: 'group_message', ts: new Date().toISOString(), payload: { group_id: 'g1' } }));
+      res.write(frame(104, 'group_message', { seq: 104, type: 'group_message', ts: new Date().toISOString(), payload: { group_id: 'g1' } }));
+      req.on('close', () => { try { res.end(); } catch {} });
+      return;
+    }
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      res.setHeader('Content-Type', 'application/json');
+      if (url.pathname === '/api/heartbeat') {
+        if (req.headers['x-ai-token'] !== 'test-node-token' && req.headers['x-ai-token'] !== 'test-ai-token') {
+          res.writeHead(401); res.end(JSON.stringify({ ok: false, error: 'login required' })); return;
+        }
+        state.heartbeats += 1;
+        res.end(JSON.stringify({ ok: true, lastActiveTs: new Date().toISOString(), online: true })); return;
+      }
+      if (url.pathname === '/api/node/headers') {
+        if (req.method === 'GET') {
+          const tok = req.headers['x-ai-token'];
+          if (tok) {
+            if (tok !== 'test-node-token') { res.writeHead(401); res.end(JSON.stringify({ ok: false, error: 'invalid AI token' })); return; }
+            res.end(JSON.stringify({ ok: true, node: 'node:testnode', lastSeq: state.node.lastSeq, lastHash: state.node.lastHash, received: state.node.received, updatedAt: new Date().toISOString() })); return;
+          }
+          const node = url.searchParams.get('node');
+          if (!node) { res.writeHead(400); res.end(JSON.stringify({ ok: false, error: 'node query param required without token' })); return; }
+          res.end(JSON.stringify({ ok: true, node, lastSeq: state.node.lastSeq, lastHash: state.node.lastHash, received: state.node.received, updatedAt: null })); return;
+        }
+        // POST：节点身份 + 验链 + ack（与真实服务端同一口径）
+        const tok = req.headers['x-ai-token'];
+        if (!tok) { res.writeHead(401); res.end(JSON.stringify({ ok: false, error: 'login required' })); return; }
+        if (tok === 'test-ai-token') { res.writeHead(403); res.end(JSON.stringify({ ok: false, error: 'only node accounts can upload headers' })); return; }
+        if (tok !== 'test-node-token') { res.writeHead(401); res.end(JSON.stringify({ ok: false, error: 'invalid AI token' })); return; }
+        if (state.failNextUpload > 0) { state.failNextUpload -= 1; res.writeHead(500); res.end(JSON.stringify({ ok: false, error: 'mock transient 500' })); return; }
+        let data = null;
+        try { data = JSON.parse(body); } catch { res.writeHead(400); res.end(JSON.stringify({ ok: false, error: 'invalid JSON' })); return; }
+        const headers = data && data.headers;
+        if (!Array.isArray(headers) || headers.length === 0 || headers.length > 100) { res.writeHead(400); res.end(JSON.stringify({ ok: false, error: 'headers must be an array of 1..100' })); return; }
+        for (const h of headers) {
+          if (typeof h !== 'object' || h === null) { res.writeHead(400); res.end(JSON.stringify({ ok: false, error: 'header must be an object' })); return; }
+          const { hash, ...rest } = h;
+          const expect = crypto.createHash('sha256').update(canonical(rest), 'utf8').digest('hex');
+          if (expect !== hash) { res.writeHead(400); res.end(JSON.stringify({ ok: false, error: 'hash mismatch for seq ' + h.seq })); return; }
+        }
+        for (let i = 1; i < headers.length; i++) {
+          if (headers[i].seq !== headers[i - 1].seq + 1 || headers[i].prevHash !== headers[i - 1].hash) {
+            res.writeHead(400); res.end(JSON.stringify({ ok: false, error: 'batch not continuous at index ' + i })); return;
+          }
+        }
+        const first = headers[0];
+        const isRebase = first.seq === 1 && first.prevHash === '0'.repeat(64);
+        if (state.node.received > 0 && !isRebase) {
+          if (first.seq !== state.node.lastSeq + 1 || first.prevHash !== state.node.lastHash) {
+            res.writeHead(409); res.end(JSON.stringify({ ok: false, error: 'chain gap', expectedSeq: state.node.lastSeq + 1, expectedPrevHash: state.node.lastHash, lastSeq: state.node.lastSeq })); return;
+          }
+        }
+        if (isRebase) state.node = { lastSeq: 0, lastHash: '0'.repeat(64), received: 0, heads: [] };
+        state.node.heads = state.node.heads.concat(headers).slice(-1000);
+        state.node.lastSeq = headers[headers.length - 1].seq;
+        state.node.lastHash = headers[headers.length - 1].hash;
+        state.node.received += headers.length;
+        state.uploads.push(headers);
+        res.end(JSON.stringify({ ok: true, accepted: headers.length, lastSeq: state.node.lastSeq, lastHash: state.node.lastHash, node: 'node:testnode' }));
+        return;
+      }
+      res.end(JSON.stringify({ ok: true, posts: 472, accounts: 30, groups: 10, messages: 1676, dms: 7 }));
+    });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => resolve({
+      server,
+      state,
+      url: `http://127.0.0.1:${server.address().port}`,
+      setNodeState(s) { state.node = { ...state.node, ...s }; },
+      close() { server.close(); },
+    }));
+  });
+}
+
 // 最小 WS 服务端（仅 §7 测试用）：握手后立刻发一条 hello，之后保持连接。
 // 只实现服务端发帧（FIN + opcode 1，小 payload），不解析客户端帧。
 function startMockWsServer() {
@@ -134,7 +232,7 @@ async function main() {
     const res = await fetch(`http://127.0.0.1:${actualPort}/health`);
     const body = await res.json();
     assert.strictEqual(body.ok, true);
-    assert.strictEqual(body.tier, 'read-only');
+    assert.strictEqual(body.tier, 'sync-upload');
     ok(`节点启动：/health ok，监听 127.0.0.1:${actualPort}`);
 
     // 同步一次应写哈希链
@@ -169,6 +267,130 @@ async function main() {
   } finally {
     seed.close();
     fs.rmSync(tmp, { recursive: true, force: true });
+  }
+
+  console.log('== 3b. 节点上传与自检（mock 论坛） ==');
+  const forum = await startMockForum();
+  const forumUrl = forum.url;
+  const tmp3b = fs.mkdtempSync(path.join(os.tmpdir(), 'chimera-node-upload-'));
+  try {
+    // token 文件（0600）：节点身份
+    const tokenFile = path.join(tmp3b, 'node-token');
+    fs.writeFileSync(tokenFile, 'test-node-token\n');
+    fs.chmodSync(tokenFile, 0o600);
+
+    // (a) 上传流程：启动 1 次同步 + 3 次同步 → 全部上传成功，游标持久化
+    const nm = new NodeManager({
+      nodeDir: path.join(tmp3b, 'node'),
+      apiBase: forumUrl,
+      config: { enabled: false, port: 0, seeds: [forumUrl], forumTokenFile: tokenFile },
+      onLog: () => {},
+    });
+    await nm.start();
+    await nm.syncOnce();
+    await nm.syncOnce();
+    await nm.syncOnce();
+    assert.ok(nm.lastUploadedSeq >= 3, `同步后应上传 >=3 条，实际 ${nm.lastUploadedSeq}`);
+    assert.strictEqual(forum.state.node.lastSeq, nm.lastUploadedSeq, 'mock 服务端 lastSeq 应与客户端游标一致');
+    assert.ok(forum.state.heartbeats >= 3, '同步应顺带发心跳');
+    const upState = JSON.parse(fs.readFileSync(path.join(tmp3b, 'node', 'upload-state.json'), 'utf8'));
+    assert.strictEqual(upState.lastUploadedSeq, nm.lastUploadedSeq, '游标应持久化到 upload-state.json');
+    assert.strictEqual(nm.status().upload.lastUploadedSeq, nm.lastUploadedSeq, 'status().upload 应带游标');
+    assert.strictEqual(nm.status().tier, 'sync-upload', '档位应为 sync-upload');
+    ok(`上传流程：同步全部上传，lastUploadedSeq=${nm.lastUploadedSeq}，心跳 ${forum.state.heartbeats} 次`);
+    await nm.stop();
+
+    // (b) 重试/退避：下一次上传先 500，再同步应成功
+    const nm2 = new NodeManager({
+      nodeDir: path.join(tmp3b, 'node'),
+      apiBase: forumUrl,
+      config: { enabled: false, port: 0, seeds: [forumUrl], forumTokenFile: tokenFile },
+      onLog: () => {},
+    });
+    await nm2.start();
+    forum.state.failNextUpload = 1;
+    await nm2.syncOnce();
+    assert.strictEqual(nm2.uploadFailures, 1, '500 后失败数应为 1');
+    assert.ok(nm2._nextUploadAt > Date.now(), '失败后应设退避门');
+    nm2._nextUploadAt = 0; // 测试里直接放行退避（白盒）
+    await nm2.syncOnce();
+    assert.strictEqual(nm2.uploadFailures, 0, '重试成功后失败数应清零');
+    assert.ok(nm2.lastUploadedSeq > 3, '重试后游标应继续前进');
+    ok(`重试退避：500 后失败数 1、退避门已设，放行后重试成功，lastUploadedSeq=${nm2.lastUploadedSeq}`);
+    await nm2.stop();
+
+    // (c) 链自检：改坏一行 → 启动隔离 + 重起新链
+    const headersFile = path.join(tmp3b, 'node', 'replica', 'headers.jsonl');
+    const rawLines = fs.readFileSync(headersFile, 'utf8').split('\n').filter(Boolean);
+    assert.ok(rawLines.length >= 2, '自检前应至少有 2 条头');
+    const bad = JSON.parse(rawLines[0]);
+    bad.hash = '0'.repeat(64); // 篡改第一行 hash
+    rawLines[0] = JSON.stringify(bad);
+    fs.writeFileSync(headersFile, rawLines.join('\n') + '\n');
+    let brokenEv = null;
+    const nm3 = new NodeManager({
+      nodeDir: path.join(tmp3b, 'node'),
+      apiBase: forumUrl,
+      config: { enabled: false, port: 0, seeds: [forumUrl], forumTokenFile: tokenFile },
+      onLog: () => {},
+    });
+    nm3.on('chain-broken', (e) => { brokenEv = e; });
+    assert.strictEqual(nm3._selfCheckChain().ok, false, '改坏的链自检应失败');
+    await nm3.start();
+    assert.ok(brokenEv && /自哈希不符/.test(brokenEv.error), '启动时应发 chain-broken 事件并报自哈希不符');
+    const corrupt = fs.readdirSync(path.join(tmp3b, 'node', 'replica')).filter((f) => f.startsWith('headers.jsonl.corrupt-'));
+    assert.strictEqual(corrupt.length, 1, '坏文件应移旁一份');
+    assert.strictEqual(nm3.headersCount, 1, '隔离后首次同步应只有新链 1 条头');
+    assert.strictEqual(nm3._nextSeq, 2, '新链 seq 应从 1 起');
+    assert.strictEqual(nm3.status().upload.chainOk, true, '新链同步成功后 chainOk 应恢复');
+    ok('链自检：改坏一行被检出，坏文件移旁，新链从 seq 1 重起');
+    await nm3.stop();
+
+    // (d) 409 → 重基：本地链换成与服务端不衔接的 seq 4 头
+    const nm4dir = path.join(tmp3b, 'node4');
+    const nm4 = new NodeManager({
+      nodeDir: nm4dir,
+      apiBase: forumUrl,
+      config: { enabled: false, port: 0, seeds: [forumUrl], forumTokenFile: tokenFile },
+      onLog: () => {},
+    });
+    await nm4.start();
+    await nm4.syncOnce(); // seq 1 创世上传（mock 收到重基，lastSeq=1）
+    await nm4.stop();
+    // 伪造一条与服务端不衔接的 seq 4 头（自哈希合法，但 prevHash 不是服务端 lastHash）
+    const forgedBody = { seq: 4, kind: 'community-head', ts: new Date().toISOString(), posts: 999, accounts: 30, groups: 10, messages: 9999, dms: 7, prevHash: 'b'.repeat(64) };
+    const forgedHash = crypto.createHash('sha256').update(JSON.stringify(forgedBody, Object.keys(forgedBody).sort()), 'utf8').digest('hex');
+    fs.writeFileSync(path.join(nm4dir, 'replica', 'headers.jsonl'), JSON.stringify({ ...forgedBody, hash: forgedHash }) + '\n');
+    fs.writeFileSync(path.join(nm4dir, 'upload-state.json'), JSON.stringify({ lastUploadedSeq: 3, lastUploadAt: null, failures: 0, lastRebaseAt: 0 }, null, 2));
+    const nm5 = new NodeManager({
+      nodeDir: nm4dir,
+      apiBase: forumUrl,
+      config: { enabled: false, port: 0, seeds: [forumUrl], forumTokenFile: tokenFile },
+      onLog: () => {},
+    });
+    await nm5.start(); // 自检：单行链自洽，通过；首次同步追加 seq 5，上传 seq 4-5 → 409 → 重基
+    assert.strictEqual(nm5.chainOk, true, '伪造单行链自洽，自检应通过');
+    assert.ok(nm5._lastRebaseAt > 0, '409 后应触发本地重基');
+    assert.strictEqual(nm5.lastUploadedSeq, 0, '重基后游标应归零');
+    await nm5.syncOnce(); // 新链 seq 1 上传（服务端重基接受）
+    assert.strictEqual(nm5.lastUploadedSeq, 1, '重基后新链 seq 1 应上传成功');
+    assert.strictEqual(forum.state.node.lastSeq, 1, '服务端重基后 lastSeq 应为 1');
+    ok('409 重基：不衔接的链触发 409，本地重基后新链上传成功，服务端 lastSeq=1');
+    await nm5.stop();
+
+    // (e) SSE 缺口：WS 挂掉回落 SSE，流里 seq 101 → 104 应发 gap 事件
+    const rt = new RealtimeClient(forumUrl, { wsUrl: 'wss://127.0.0.1:9/ws' });
+    const gapP = new Promise((resolve) => rt.on('gap', resolve));
+    rt.start();
+    const gap = await withTimeout(gapP, 20000, 'SSE gap 事件');
+    assert.strictEqual(gap.expected, 102, '缺口起点应为 102');
+    assert.strictEqual(gap.got, 104, '缺口终点应为 104');
+    assert.strictEqual(gap.transport, 'sse', '缺口应在 SSE 路上');
+    rt.stop();
+    ok(`SSE 缺口：seq 101 → 104 触发 gap 事件（expected=${gap.expected}, got=${gap.got}）`);
+  } finally {
+    forum.close();
+    fs.rmSync(tmp3b, { recursive: true, force: true });
   }
 
   console.log('== 4. live WS（内核 v2，匿名，不写线上状态）==');

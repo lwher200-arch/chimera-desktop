@@ -595,18 +595,23 @@ async function refreshNodePanel() {
       st.state === 'stopping' ? '漂流站点停止中…' :
       st.state === 'error' ? '漂流站点出错：' + (st.lastError || '') :
       '漂流站点已停靠';
+    const up = st.upload || {};
     $('nodeStateSub').textContent = on
-      ? `同步副本 · 脱敏同步 · 端口 ${st.port} · 已同步 ${st.headers} 条头${st.l2Head ? ' · L2 高度 ' + st.l2Head.height : ' · L2 链头不可达'} · 上传接入中`
-      : '开启后成为一个漂流站点：只同步脱敏的哈希与元数据，随时可停';
+      ? `同步 + 上传 · 脱敏同步 · 端口 ${st.port} · 已同步 ${st.headers} 条头${st.l2Head ? ' · L2 高度 ' + st.l2Head.height : ' · L2 链头不可达'} · 已上传 ${up.lastUploadedSeq || 0} 条${up.lastUploadAt ? ' · 最近上传 ' + fmtTime(up.lastUploadAt) : ''}${up.chainOk === false ? ' · 链自检异常' : ''}`
+      : '开启后成为一个漂流站点：同步并上传脱敏的哈希与元数据，随时可停';
     $('nodeNavBadge').textContent = on ? '开' : '关';
     $('nodeNavBadge').className = 'node-badge ' + (on ? 'on' : 'off');
     $('nodeStats').innerHTML = `
       <div class="stat-card"><div class="stat-label">状态</div><div class="stat-value">${esc(st.state)}</div></div>
-      <div class="stat-card"><div class="stat-label">档位</div><div class="stat-value">${esc(st.tier === 'read-only' ? '同步副本' : st.tier)}</div></div>
+      <div class="stat-card"><div class="stat-label">档位</div><div class="stat-value">${esc(st.tier === 'sync-upload' ? '同步 + 上传' : st.tier)}</div></div>
       <div class="stat-card"><div class="stat-label">运行时长</div><div class="stat-value">${st.uptimeSec}s</div></div>
       <div class="stat-card"><div class="stat-label">本地副本头</div><div class="stat-value">${st.headers} 条</div></div>
       <div class="stat-card"><div class="stat-label">已知 peer</div><div class="stat-value">${st.peers}（在线 ${st.peersOnline}）</div></div>
       <div class="stat-card"><div class="stat-label">上次同步</div><div class="stat-value">${esc(fmtTime(st.lastSyncAt) || '—')}（${st.lastSyncOk === false ? '失败' : '正常'}）</div></div>
+      <div class="stat-card"><div class="stat-label">已上传</div><div class="stat-value">${up.lastUploadedSeq || 0} 条</div></div>
+      <div class="stat-card"><div class="stat-label">最近上传</div><div class="stat-value">${esc(fmtTime(up.lastUploadAt) || '—')}</div></div>
+      <div class="stat-card"><div class="stat-label">上传失败</div><div class="stat-value">${up.failures || 0} 次</div></div>
+      <div class="stat-card"><div class="stat-label">链自检</div><div class="stat-value">${up.chainOk === false ? '异常' : '正常'}</div></div>
       <div class="stat-card"><div class="stat-label">论坛身份</div><div class="stat-value">${st.hasForumIdentity ? '已绑定' : '未绑定（仅本地跑）'}</div></div>`;
   } catch (err) {
     $('nodeStateText').textContent = '节点状态读取失败：' + (err.message || err);

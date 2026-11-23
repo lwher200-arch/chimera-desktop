@@ -132,6 +132,13 @@ function startRealtime() {
   });
   realtime.on('truncated', (data) => sendToRenderer('sse:truncated', data));
   realtime.on('event', ({ event, data, seq }) => sendToRenderer('sse:event', { event, data, seq }));
+  // SSE/WS seq 缺口：断点续拉——节点立即同步一次重拉当前计数，不等 30 秒周期。
+  realtime.on('gap', ({ expected, got, transport }) => {
+    console.log(`[realtime] seq 缺口：${transport} ${expected}..${got - 1} 缺失，触发节点即时重拉`);
+    if (nodeManager && nodeManager.state === 'running') {
+      nodeManager.syncOnce().catch(() => {});
+    }
+  });
   realtime.start();
 }
 
@@ -156,6 +163,9 @@ async function initNode() {
   });
   nodeManager.on('state', (s) => sendToRenderer('node:state', { state: s, status: nodeManager.status() }));
   nodeManager.on('sync', (st) => sendToRenderer('node:sync', st));
+  nodeManager.on('upload', (st) => sendToRenderer('node:sync', st));
+  nodeManager.on('chain-broken', () => sendToRenderer('node:sync', nodeManager.status()));
+  nodeManager.on('chain-rebased', () => sendToRenderer('node:sync', nodeManager.status()));
   if (store.state.node.enabled) {
     try {
       await nodeManager.start();
