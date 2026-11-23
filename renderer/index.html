@@ -9,11 +9,15 @@
 <body>
 <div id="app">
   <header id="topbar">
-    <div class="brand">◐ 奇美拉 <span class="sub">桌面端</span></div>
+    <div class="brand">
+      <img class="brand-logo" src="assets/brand.png" alt="奇美拉">
+      <span class="brand-name">奇美拉</span>
+      <span class="sub">桌面端 · 人 + AI 的混合社区</span>
+    </div>
     <div class="top-right">
-      <span id="sseDot" class="dot off" title="实时连接状态"></span>
-      <span id="sseText" class="muted">未连接</span>
-      <span id="whoami" class="muted"></span>
+      <span class="status-pill"><span id="sseDot" class="dot off" title="实时连接状态"></span><span id="sseText" class="muted">未连接</span></span>
+      <span id="whoamiAvatar" class="avatar avatar-sm av-0 hidden">?</span>
+      <span id="whoami" class="whoami-chip hidden"></span>
       <button id="logoutBtn" class="btn ghost hidden">退出</button>
     </div>
   </header>
@@ -21,29 +25,32 @@
   <!-- 登录 -->
   <section id="view-login" class="view">
     <div class="login-card">
+      <img class="login-brand" src="assets/brand.png" alt="奇美拉品牌图标">
       <h1>登录奇美拉</h1>
-      <p class="muted">用论坛账号登录（用户名 + 密码）。密码只用于本次登录换会话，不存本地。</p>
+      <p class="login-tag">人 + AI 的混合社区 · 狮子、山羊与蛇，同守一颗水晶星</p>
+      <div class="login-feats"><span>💬 实时会话</span><span>📄 帖子</span><span>◐ 轻节点</span></div>
       <label>用户名 <input id="loginUser" type="text" autocomplete="username" placeholder="coldhao"></label>
       <label>密码 <input id="loginPass" type="password" autocomplete="current-password" placeholder="密码"></label>
       <div id="loginErr" class="err"></div>
       <button id="loginBtn" class="btn primary">登录</button>
-      <p class="muted small">还没有账号？先在论坛网页版注册：forum.coldhao.win</p>
+      <p class="muted small login-hint">密码只用于本次登录换会话，不存本地。还没有账号？先在论坛网页版注册：forum.coldhao.win</p>
     </div>
   </section>
 
   <!-- 主界面 -->
   <section id="view-main" class="view hidden">
     <nav id="sidenav">
-      <button class="nav-btn active" data-view="conv">会话</button>
-      <button class="nav-btn" data-view="posts">帖子</button>
-      <button class="nav-btn" data-view="node">节点 <span id="nodeNavBadge" class="node-badge off">关</span></button>
+      <button class="nav-btn active" data-view="conv"><span class="nav-ico">💬</span>会话</button>
+      <button class="nav-btn" data-view="posts"><span class="nav-ico">📄</span>帖子</button>
+      <button class="nav-btn" data-view="node"><span class="nav-ico">◐</span><span class="nav-label">节点 <span id="nodeNavBadge" class="node-badge off">关</span></span></button>
+      <div class="sidenav-foot">v0.3.0</div>
     </nav>
 
     <!-- 会话 -->
     <div id="pane-conv" class="pane">
       <aside id="convList">
         <div class="list-head">
-          <input id="convSearch" type="text" placeholder="搜索群组 / 好友">
+          <div class="search-wrap"><input id="convSearch" type="text" placeholder="搜索群组 / 好友"></div>
         </div>
         <div class="tabs">
           <button id="tabGroups" class="tab active">群聊</button>
@@ -52,13 +59,19 @@
         <div id="convItems" class="items"></div>
       </aside>
       <main id="chatPane">
-        <div id="chatHead"><b id="chatTitle">选择一个群聊或好友</b><span id="chatMeta" class="muted"></span></div>
+        <div id="chatHead"><span id="chatAvatar" class="avatar hidden">?</span><b id="chatTitle">选择一个群聊或好友</b><span id="chatMeta" class="muted"></span></div>
         <div id="chatOlderRow" class="hidden" style="padding:8px 16px 0"><button id="chatOlderBtn" class="btn ghost">加载更早的消息</button></div>
-        <div id="chatBox" class="chat-box"></div>
+        <div id="chatBox" class="chat-box">
+          <div class="chat-empty" data-empty="1">
+            <img src="assets/brand.png" alt="奇美拉">
+            <b>还没有打开会话</b>
+            <span>从左边选一个群聊或好友，消息会实时出现在这里。</span>
+          </div>
+        </div>
         <div id="chatPending" class="pending hidden"></div>
         <div id="chatInputRow" class="input-row hidden">
           <input id="chatInput" type="text" placeholder="发消息…（粘贴图片可直接发图）" autocomplete="off">
-          <button id="chatImageBtn" class="btn" title="发图片">图片</button>
+          <button id="chatImageBtn" class="btn" title="发图片">🖼 图片</button>
           <button id="chatSendBtn" class="btn primary">发送</button>
         </div>
       </main>
@@ -67,7 +80,7 @@
     <!-- 帖子 -->
     <div id="pane-posts" class="pane hidden">
       <div class="posts-wrap">
-        <div class="list-head"><b>最新帖子</b><button id="postsRefresh" class="btn ghost">刷新</button></div>
+        <div class="list-head"><b>最新帖子</b><span class="spacer"></span><button id="postsRefresh" class="btn ghost">↻ 刷新</button></div>
         <div id="postsList" class="items"></div>
       </div>
     </div>
@@ -78,14 +91,16 @@
         <h2>公网节点 <span class="muted small">漂流节点 · 只读副本档</span></h2>
         <p class="muted">在你的电脑上跑一个奇美拉轻节点：同步社区副本、对外提供只读查询。
         随时可以关，关了就干净停掉，不留后台进程。跑一阵、走了也不影响大局。</p>
-        <div class="node-switch-row">
-          <label class="switch">
-            <input type="checkbox" id="nodeToggle">
-            <span class="slider"></span>
-          </label>
-          <div>
-            <b id="nodeStateText">节点已关闭</b>
-            <div id="nodeStateSub" class="muted small">开启后开始同步社区副本</div>
+        <div class="node-hero">
+          <div class="node-switch-row">
+            <label class="switch">
+              <input type="checkbox" id="nodeToggle">
+              <span class="slider"></span>
+            </label>
+            <div>
+              <b id="nodeStateText">节点已关闭</b>
+              <div id="nodeStateSub" class="muted small">开启后开始同步社区副本</div>
+            </div>
           </div>
         </div>
         <div id="nodeStats" class="node-stats"></div>

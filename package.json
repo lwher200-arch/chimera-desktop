@@ -1,6 +1,6 @@
 {
   "name": "chimera-desktop",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "奇美拉社区桌面端（终端）：实时会话 / 群聊 / 好友客户端，对接 forum.coldhao.win",
   "author": "Chimera community",
   "license": "MIT",
@@ -17,7 +17,10 @@
     "electron-builder": "^26.18.0"
   },
   "build": {
-    "electronLanguages": ["en", "zh-CN"],
+    "electronLanguages": [
+      "en",
+      "zh-CN"
+    ],
     "appId": "win.coldhao.chimera.desktop",
     "productName": "Chimera 桌面端",
     "directories": {
