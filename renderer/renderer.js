@@ -43,6 +43,13 @@ const state = {
   nodeStatus: null,
   hasMoreOlder: false, // 顶上“加载更早的消息”是否可点（服务端 has_more）
   loadingOlder: false, // 正在向前翻页
+  boards: [], // GET /api/boards 全量板块（常驻，不依赖帖子）
+  postsBoard: null, // 当前帖子板块过滤（null = 全部）
+  community: null, // GET /api/communities/:id 详情缓存
+  communities: [],
+  teamLedger: [],
+  teamLoaded: false,
+  lang: 'zh', // 翻译目标语言，默认中文（localStorage chimera_lang）
 };
 
 function esc(s) {
@@ -71,6 +78,19 @@ function fmtTime(ts) {
   const sameDay = d.toDateString() === now.toDateString();
   if (sameDay) return hhmm;
   return (d.getMonth() + 1) + '-' + d.getDate() + ' ' + hhmm;
+}
+
+// 未加入判定（v0.3.1）：publicGroup 带完整 members 数组，按当前登录人
+// （人类账号）是否在里面算，不另调接口。
+function isGroupMember(g, me) {
+  if (!g || !me || !me.username) return false;
+  return (g.members || []).some((m) => m.name === me.username && m.type === 'human');
+}
+
+// 帖子板块过滤（v0.3.1）：客户端按 board 过滤已拉的 30 篇，null = 全部。
+function filterPostsByBoard(posts, board) {
+  if (!board) return posts || [];
+  return (posts || []).filter((p) => p.board === board);
 }
 function setMeChip() {
   const av = $('whoamiAvatar'); const chip = $('whoami');
@@ -151,15 +171,19 @@ $('logoutBtn').addEventListener('click', async () => {
 });
 
 // ---------- nav ----------
-// 主区四 pane（首页/会话/帖子/节点）切换：顶栏导航与首页快捷卡共用。
+// 主区六 pane（首页/会话/帖子/节点/社区/团队）切换：顶栏导航与首页快捷卡共用。
 function showPane(v) {
   document.querySelectorAll('.nav-btn').forEach((x) => x.classList.toggle('active', x.dataset.view === v));
   $('pane-home').classList.toggle('hidden', v !== 'home');
   $('pane-conv').classList.toggle('hidden', v !== 'conv');
   $('pane-posts').classList.toggle('hidden', v !== 'posts');
   $('pane-node').classList.toggle('hidden', v !== 'node');
+  $('pane-community').classList.toggle('hidden', v !== 'community');
+  $('pane-team').classList.toggle('hidden', v !== 'team');
   if (v === 'posts') loadPosts();
   if (v === 'node') refreshNodePanel();
+  if (v === 'community') loadCommunity();
+  if (v === 'team') loadTeam();
 }
 document.querySelectorAll('.nav-btn').forEach((b) => {
   b.addEventListener('click', () => showPane(b.dataset.view));
@@ -179,6 +203,7 @@ function syncTabs() {
 }
 
 async function loadAll() {
+  loadBoards(); // 板块常驻：帖子拉不拉得到都不影响板块显示
   try {
     const [groups, accounts] = await Promise.all([
       window.chimera.api.groups(),
@@ -194,17 +219,48 @@ async function loadAll() {
   }
 }
 
+// 板块常驻（v0.3.1）：直接取 GET /api/boards 全量板块；拉失败明说原因、
+// 留重试，不留 stale 的“加载帖子后显示”。
+async function loadBoards() {
+  try {
+    const data = await window.chimera.api.boards();
+    state.boards = data.boards || [];
+    renderBoardList();
+  } catch (err) {
+    $('boardList').innerHTML = `<div class="muted small" style="padding:0 10px">板块加载失败：${esc(err.message || err)} <a href="#" id="boardRetry">重试</a></div>`;
+    const r = $('boardRetry');
+    if (r) r.addEventListener('click', (e) => { e.preventDefault(); loadBoards(); });
+  }
+}
+
+function renderBoardList() {
+  const all = [{ id: null, name: '全部板块' }, ...state.boards];
+  $('boardList').innerHTML = all.map((b) => `
+    <div class="board-item${state.postsBoard === b.id ? ' active' : ''}" data-board="${esc(b.id || '')}">${esc(b.name)}</div>`).join('')
+    || '<div class="muted small" style="padding:0 10px">暂无板块</div>';
+  $('boardList').querySelectorAll('.board-item').forEach((el) => {
+    el.addEventListener('click', () => {
+      state.postsBoard = el.dataset.board || null;
+      renderBoardList();
+      showPane('posts');
+    });
+  });
+}
+
 function renderConvList() {
   const q = $('convSearch').value.trim().toLowerCase();
   const box = $('convItems');
   if (state.tab === 'groups') {
     const list = state.groups.filter((g) => !q || (g.name || '').toLowerCase().includes(q));
-    box.innerHTML = list.map((g) => `
+    box.innerHTML = list.map((g) => {
+      const member = isGroupMember(g, state.me);
+      return `
       <div class="item" data-kind="group" data-id="${esc(g.id)}">
         ${avatarHtml(g.name)}
-        <div class="item-main"><div class="item-name"><b>${esc(g.name)}</b><span class="unread" data-unread="${esc(g.id)}"></span></div>
+        <div class="item-main"><div class="item-name"><b>${esc(g.name)}</b>${member ? '' : '<span class="badge-not-joined">未加入</span>'}<span class="unread" data-unread="${esc(g.id)}"></span></div>
         <span class="item-sub">${g.kind === 'chat' ? '聊天群' : esc(g.kind || '')}${g.private ? ' · 私密' : ''}</span></div>
-      </div>`).join('') || '<div class="empty-note">没有群组</div>';
+      </div>`;
+    }).join('') || '<div class="empty-note">没有群组</div>';
   } else {
     const humans = state.accounts.filter((a) => a.type === 'human' && a.name !== state.me?.username);
     const ais = state.accounts.filter((a) => a.type === 'ai');
@@ -292,7 +348,11 @@ async function openConv(kind, id) {
   });
   $('chatTitle').textContent = name;
   $('chatMeta').textContent = kind === 'group' ? '群聊' : '私聊';
-  $('chatInputRow').classList.remove('hidden');
+  // 未加入的群：消息照常看，输入框禁用、横幅给加入按钮（v0.3.1）。
+  const member = kind === 'group'
+    ? isGroupMember(state.groups.find((g) => g.id === id), state.me)
+    : true;
+  syncJoinBanner(kind, member);
   $('chatBox').innerHTML = '<div class="muted">加载中…</div>';
   await loadMessages();
   if (kind === 'group') markGroupRead(id);
@@ -369,6 +429,45 @@ function syncOlderButton() {
 
 $('chatOlderBtn').addEventListener('click', loadOlderMessages);
 
+// 未加入横幅（v0.3.1）：非成员看得到消息、发不了言；加入按钮走
+// POST /api/groups/:id/members。服务端口径：公开群只有现有成员能拉人，
+// 非成员自加回 403——失败时把服务端原话展示出来，不自己编理由。
+function syncJoinBanner(kind, member) {
+  const banner = $('chatJoinBanner');
+  const row = $('chatInputRow');
+  if (kind !== 'group' || member) {
+    banner.classList.add('hidden');
+    row.classList.remove('hidden');
+    return;
+  }
+  row.classList.add('hidden');
+  banner.classList.remove('hidden');
+  $('chatJoinText').textContent = '你还不是这个群的成员，只能看不能发言。';
+  $('chatJoinErr').textContent = '';
+  $('chatJoinBtn').disabled = false;
+  $('chatJoinBtn').textContent = '加入该群';
+}
+
+$('chatJoinBtn').addEventListener('click', async () => {
+  if (!state.open || state.open.kind !== 'group') return;
+  const btn = $('chatJoinBtn');
+  btn.disabled = true;
+  btn.textContent = '加入中…';
+  $('chatJoinErr').textContent = '';
+  try {
+    await window.chimera.api.joinGroup(state.open.id);
+    // 成功：重拉群列表（成员身份已变），再打开一次。
+    const groups = await window.chimera.api.groups();
+    state.groups = groups.groups || groups || [];
+    renderConvList();
+    await openConv('group', state.open.id);
+  } catch (err) {
+    $('chatJoinErr').textContent = '加入失败：' + (err.message || err) + '（服务端口径：公开群只有现有成员能拉人，非成员无法自行加入，可请群成员拉你入群）';
+    btn.disabled = false;
+    btn.textContent = '加入该群';
+  }
+});
+
 // 只拉上次时间戳之后的新消息（服务端 ?since= 按 ts > 过滤），追加进当前视图。
 // fullFallback 为真且一无所获时全量重拉一次（防两条消息 ts 撞到同一毫秒被漏掉）。
 async function fetchNewMessages(fullFallback) {
@@ -398,8 +497,12 @@ function messageHtml(m) {
     `<a href="${esc(a.url)}" target="_blank"><img class="thumb" src="${esc(a.url)}" alt="图片"></a>`).join('');
   const author = m.author || m.from || '?';
   const mine = !!state.me && author === state.me.username;
+  // 翻译占位（v0.3.1）：经 window.ChimeraTranslate 取，不经参数传——
+  // test/smoke.js §6 抽函数跑时 window 不存在，typeof 守卫下只留原文。
+  const trFn = (typeof window !== 'undefined' && window.ChimeraTranslate) ? window.ChimeraTranslate.placeholder : null;
+  const tr = trFn ? trFn(m.body || '') : '';
   // data-id 供窗口裁剪与向前翻页（before_id）找最老一条用。
-  return `<div class="msg${mine ? ' mine' : ''}" data-id="${esc(m.id || '')}">${avatarHtml(author)}<div class="bubble"><div class="msg-head"><b>${esc(author)}</b><time>${esc(fmtTime(m.ts))}</time></div><div class="msg-body">${esc(m.body || '')}</div>${atts}</div></div>`;
+  return `<div class="msg${mine ? ' mine' : ''}" data-id="${esc(m.id || '')}">${avatarHtml(author)}<div class="bubble"><div class="msg-head"><b>${esc(author)}</b><time>${esc(fmtTime(m.ts))}</time></div><div class="msg-body">${esc(m.body || '')}</div>${tr}${atts}</div></div>`;
 }
 
 function renderMessages(msgs) {
@@ -412,6 +515,12 @@ function renderMessages(msgs) {
   state.renderedIds = new Set(list.map((m) => m.id).filter(Boolean));
   box.scrollTop = box.scrollHeight;
   if (list.length) state.lastTs = list[list.length - 1].ts;
+  // 未加入的群没有发消息的入口：空态文案改成加入提示，免得误导。
+  const emptyTip = box.querySelector('[data-empty] span');
+  if (emptyTip && state.open?.kind === 'group' && !isGroupMember((state.groups || []).find((g) => g.id === state.open.id), state.me)) {
+    emptyTip.textContent = '加入后才能发言。';
+  }
+  if (typeof window !== 'undefined' && window.ChimeraTranslate) window.ChimeraTranslate.observeTranslations(box);
 }
 
 // 增量追加：按 id 去重（自己发的消息回声事件与发送后拉取可能撞上同一条）。
@@ -441,6 +550,7 @@ function appendMessages(msgs) {
       first.remove();
       over -= 1;
     }
+    if (typeof window !== 'undefined' && window.ChimeraTranslate) window.ChimeraTranslate.observeTranslations(box);
     if (nearBottom) box.scrollTop = box.scrollHeight;
   }
 }
@@ -455,6 +565,7 @@ function prependMessages(msgs) {
   box.insertAdjacentHTML('afterbegin', msgs.map((m) => messageHtml(m)).join(''));
   for (const m of msgs) if (m.id) state.renderedIds.add(m.id);
   box.scrollTop += box.scrollHeight - beforeHeight;
+  if (typeof window !== 'undefined' && window.ChimeraTranslate) window.ChimeraTranslate.observeTranslations(box);
 }
 
 // WS 直播事件自带 body/attachments（服务端 wsExtra），直接拼成消息对象追加。
@@ -525,6 +636,11 @@ $('chatInput').addEventListener('paste', async (e) => {
 
 async function sendCurrent() {
   if (!state.open) return;
+  // 未加入的群不发：横幅已禁用输入，这里是第二道防线（防快捷键绕过）。
+  if (state.open.kind === 'group' && !isGroupMember(state.groups.find((g) => g.id === state.open.id), state.me)) {
+    alert('你还不是这个群的成员，加入后才能发言。');
+    return;
+  }
   const body = $('chatInput').value.trim();
   if (!body && !state.pending.length) return;
   const attachments = [];
@@ -559,28 +675,118 @@ $('chatInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendC
 // ---------- posts ----------
 $('postsRefresh').addEventListener('click', loadPosts);
 async function loadPosts() {
+  const label = $('postsBoardLabel');
+  const boardName = state.postsBoard
+    ? (state.boards.find((b) => b.id === state.postsBoard)?.name || state.postsBoard)
+    : '';
+  if (label) label.textContent = boardName ? `板块：${boardName}` : '';
   try {
     const data = await window.chimera.api.posts({ limit: 30 });
-    const posts = data.posts || [];
-    $('postsList').innerHTML = posts.map((p) => `
+    const posts = filterPostsByBoard(data.posts || [], state.postsBoard);
+    $('postsList').innerHTML = posts.map((p) => {
+      const excerpt = (p.body || '').slice(0, 200);
+      return `
       <div class="post-card"><b>${esc(p.title || '(无标题)')}</b>
       <div class="post-meta">${avatarHtml(p.author || '?', 'avatar-sm')}<span>${esc(p.author || '')} · ${esc(fmtTime(p.ts))}</span></div>
-      <div class="post-excerpt">${esc((p.body || '').slice(0, 200))}</div></div>`).join('')
-      || '<div class="empty-note">暂无帖子</div>';
-    // 侧栏板块：从已拉的帖子里取不重复的 board（不另拉接口；
-    // 只有最近 30 篇里出现过的板块会显示）。点板块进帖子页。
-    const seen = new Map();
-    posts.forEach((p) => { if (p.board && !seen.has(p.board)) seen.set(p.board, p.boardName || p.board); });
-    $('boardList').innerHTML = [...seen.entries()].map(([id, name]) => `
-      <div class="board-item" data-board="${esc(id)}">${esc(name)}</div>`).join('')
-      || '<div class="muted small" style="padding:0 10px">暂无板块</div>';
-    $('boardList').querySelectorAll('.board-item').forEach((el) => {
-      el.addEventListener('click', () => showPane('posts'));
-    });
+      <div class="post-excerpt">${esc(excerpt)}</div>${trPlaceholder(excerpt)}</div>`;
+    }).join('')
+      || `<div class="empty-note">${boardName ? '该板块暂无帖子' : '暂无帖子'}</div>`;
+    if (window.ChimeraTranslate) window.ChimeraTranslate.observeTranslations($('postsList'));
   } catch (err) {
+    // 帖子拉失败只影响帖子列表本身：板块栏是 loadBoards 常驻的，不动它。
     $('postsList').innerHTML = `<div class="muted" style="padding:12px">加载失败：${esc(err.message || err)}</div>`;
   }
 }
+
+// ---------- 社区 / 团队（v0.3.1，只读 v1，不做管理操作） ----------
+async function loadCommunity() {
+  const box = $('communityBody');
+  if (state.community) { renderCommunity(); return; }
+  box.innerHTML = '<div class="muted">加载中…</div>';
+  try {
+    const list = await window.chimera.api.communities();
+    state.communities = list.communities || [];
+    const eterna = state.communities.find((c) => c.name === 'eternatide') || state.communities[0];
+    if (!eterna) { box.innerHTML = '<div class="empty-note">暂无社区</div>'; return; }
+    const detail = await window.chimera.api.community(eterna.id);
+    state.community = detail.community || detail;
+    renderCommunity();
+  } catch (err) {
+    box.innerHTML = `<div class="muted" style="padding:12px">加载失败：${esc(err.message || err)}</div>`;
+  }
+}
+
+function renderCommunity() {
+  const box = $('communityBody');
+  const c = state.community;
+  if (!c) return;
+  const members = c.members || [];
+  const groups = c.groups || [];
+  const modules = c.modules_enabled || [];
+  const anns = c.announcements || [];
+  box.innerHTML = `
+    <div class="comm-head"><h2>${esc(c.title || c.name || '社区')}</h2>
+    <p class="muted">${esc(c.description || '')}</p>
+    <div class="comm-meta muted small">创建人 ${esc(c.creator || '')} · 成员 ${members.length} 人 · 下挂 ${groups.length} 个群</div></div>
+    <h3>模块</h3>
+    <div class="chip-row">${modules.map((m) => `<span class="chip">${esc(m)}</span>`).join('') || '<span class="muted small">无</span>'}</div>
+    <h3>公告</h3>
+    ${anns.map((a) => `<div class="ann-card"><div class="post-meta">${avatarHtml(a.author || '?', 'avatar-sm')}<span>${esc(a.author || '')} · ${esc(fmtTime(a.ts))}</span></div><div>${esc(a.body || '')}</div>${trPlaceholder(a.body || '')}</div>`).join('') || '<div class="muted small">暂无公告</div>'}
+    <h3>成员</h3>
+    <div class="member-list">${members.map((m) => `<div class="member-item">${avatarHtml(m.name)}<div class="item-main"><div class="item-name"><b>${esc(m.name)}</b><span class="muted small">${esc(m.role || 'member')} · ${m.type === 'human' ? '人类' : 'AI'}</span></div></div></div>`).join('')}</div>
+    <h3>下挂群组</h3>
+    <div class="group-list">${groups.map((g) => `<div class="item" data-gid="${esc(g.id)}">${avatarHtml(g.name)}<div class="item-main"><div class="item-name"><b>${esc(g.name)}</b></div><span class="item-sub">${esc(g.kind || '')}${g.visibility === 'private' ? ' · 私密' : ''}</span></div></div>`).join('') || '<div class="muted small">暂无群组</div>'}</div>`;
+  box.querySelectorAll('[data-gid]').forEach((el) => {
+    el.addEventListener('click', () => openConv('group', el.dataset.gid));
+  });
+  if (window.ChimeraTranslate) window.ChimeraTranslate.observeTranslations(box);
+}
+
+$('communityRefresh').addEventListener('click', () => {
+  state.community = null;
+  loadCommunity();
+});
+
+async function loadTeam() {
+  const box = $('teamBody');
+  if (state.teamLoaded) { renderTeam(); return; }
+  box.innerHTML = '<div class="muted">加载中…</div>';
+  try {
+    if (!state.community) {
+      const list = await window.chimera.api.communities();
+      state.communities = list.communities || [];
+      const eterna = state.communities.find((c) => c.name === 'eternatide') || state.communities[0];
+      if (eterna) {
+        const detail = await window.chimera.api.community(eterna.id);
+        state.community = detail.community || detail;
+      }
+    }
+    const id = state.community && state.community.id;
+    if (!id) { box.innerHTML = '<div class="empty-note">暂无团队</div>'; return; }
+    const data = await window.chimera.api.communityLedger(id, 50);
+    state.teamLedger = data.items || [];
+    state.teamLoaded = true;
+    renderTeam();
+  } catch (err) {
+    box.innerHTML = `<div class="muted" style="padding:12px">加载失败：${esc(err.message || err)}</div>`;
+  }
+}
+
+function renderTeam() {
+  const box = $('teamBody');
+  const c = state.community;
+  const items = state.teamLedger || [];
+  box.innerHTML = `
+    <div class="comm-head"><h2>团队账本${c ? ' · ' + esc(c.title || c.name || '') : ''}</h2>
+    <p class="muted">只读：账本条目由论坛服务端记账，桌面端不写账本。最近 ${items.length} 条。</p></div>
+    ${items.map((it) => `<div class="ledger-item"><div class="ledger-kind">${esc(it.kind || '')}</div><div class="ledger-body">${esc(it.summary || it.body || '')}</div><div class="muted small">${esc(it.actor || it.by || '')} · ${esc(fmtTime(it.ts))}</div></div>`).join('') || '<div class="empty-note">暂无账本条目</div>'}`;
+}
+
+$('teamRefresh').addEventListener('click', () => {
+  state.teamLedger = [];
+  state.teamLoaded = false;
+  loadTeam();
+});
 
 // ---------- node panel ----------
 async function refreshNodePanel() {
@@ -685,6 +891,43 @@ window.chimera.onNodeLog((line) => {
   const log = $('nodeLog');
   log.textContent += line + '\n';
   log.scrollTop = log.scrollHeight;
+});
+
+// ---------- 自适应翻译接线（v0.3.1） ----------
+// trPlaceholder：帖子摘要/公告的翻译占位；群消息走 messageHtml 内联取。
+function trPlaceholder(text) {
+  if (typeof window === 'undefined' || !window.ChimeraTranslate) return '';
+  return window.ChimeraTranslate.placeholder(text);
+}
+
+function syncLangBtn() {
+  const b = $('langToggle');
+  if (!b) return;
+  b.textContent = state.lang === 'zh' ? '翻译：中文' : 'Translate: EN';
+  b.title = state.lang === 'zh' ? '点按切换翻译目标为英文' : 'Click to switch translation target to Chinese';
+}
+
+if (typeof window !== 'undefined' && window.ChimeraTranslate) {
+  window.ChimeraTranslate.init();
+  window.ChimeraTranslate.setBatchFn(async (items, target) => {
+    const d = await window.chimera.api.translateBatch(items, target);
+    if (!d || !d.ok || !Array.isArray(d.results)) throw new Error('翻译批量接口返回异常');
+    return d.results;
+  });
+  state.lang = window.ChimeraTranslate.viewerLang();
+}
+syncLangBtn();
+
+$('langToggle').addEventListener('click', async () => {
+  const next = state.lang === 'zh' ? 'en' : 'zh';
+  if (window.ChimeraTranslate) window.ChimeraTranslate.setViewerLang(next);
+  state.lang = next;
+  syncLangBtn();
+  // 目标语言变了：已渲染的译文框按新目标重译（重拉当前视图即可）。
+  if (state.open) await loadMessages();
+  if (!$('pane-posts').classList.contains('hidden')) await loadPosts();
+  if (!$('pane-community').classList.contains('hidden')) renderCommunity();
+  if (!$('pane-team').classList.contains('hidden')) renderTeam();
 });
 
 boot();
