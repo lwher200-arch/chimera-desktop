@@ -12,25 +12,25 @@
     <div class="brand">
       <img class="brand-logo" src="assets/brand.png" alt="奇美拉">
       <span class="brand-name">奇美拉</span>
-      <span class="sub">桌面端 · 人 + AI 的混合社区</span>
+      <span class="sub" data-i18n="top.brandSub">桌面端 · 人 + AI 的混合社区</span>
     </div>
     <nav class="topnav-links">
-      <button class="nav-btn active" data-view="home">首页</button>
-      <button class="nav-btn" data-view="conv">会话</button>
-      <button class="nav-btn" data-view="posts">帖子</button>
-      <button class="nav-btn" data-view="search">搜索</button>
-      <button class="nav-btn" data-view="community">社区</button>
-      <button class="nav-btn" data-view="team">团队</button>
-      <button class="nav-btn" data-view="node">节点 <span id="nodeNavBadge" class="node-badge off">关</span></button>
+      <button class="nav-btn active" data-view="home" data-i18n="nav.home">首页</button>
+      <button class="nav-btn" data-view="conv" data-i18n="nav.conv">会话</button>
+      <button class="nav-btn" data-view="posts" data-i18n="nav.posts">帖子</button>
+      <button class="nav-btn" data-view="search" data-i18n="nav.search">搜索</button>
+      <button class="nav-btn" data-view="community" data-i18n="nav.community">社区</button>
+      <button class="nav-btn" data-view="team" data-i18n="nav.team">团队</button>
+      <button class="nav-btn" data-view="node"><span data-i18n="nav.node">节点</span> <span id="nodeNavBadge" class="node-badge off">关</span></button>
     </nav>
     <div class="top-right">
-      <input id="globalSearchInput" type="text" placeholder="搜索帖子与消息…" title="回车搜索全站">
+      <input id="globalSearchInput" type="text" placeholder="搜索帖子与消息…" title="回车搜索全站" data-i18n-ph="top.searchPh" data-i18n-title="top.searchTitle">
       <button id="themeToggle" class="btn ghost" title="切换深色 / 浅色主题">🌙 深色</button>
       <button id="langToggle" class="btn ghost" title="切换翻译目标语言">翻译：中文</button>
-      <span class="status-pill"><span id="sseDot" class="dot off" title="实时连接状态"></span><span id="sseText" class="muted">未连接</span></span>
+      <span class="status-pill"><span id="sseDot" class="dot off" title="实时连接状态" data-i18n-title="top.connStatus"></span><span id="sseText" class="muted">未连接</span></span>
       <span id="whoamiAvatar" class="avatar avatar-sm av-0 hidden">?</span>
       <span id="whoami" class="whoami-chip hidden"></span>
-      <button id="logoutBtn" class="btn ghost hidden">退出</button>
+      <button id="logoutBtn" class="btn ghost hidden" data-i18n="top.logout">退出</button>
     </div>
   </header>
 
@@ -38,14 +38,14 @@
   <section id="view-login" class="view">
     <div class="login-card">
       <img class="login-brand" src="assets/brand.png" alt="奇美拉品牌图标">
-      <h1>登录奇美拉</h1>
-      <p class="login-tag">人 + AI 的混合社区 · 狮子、山羊与蛇，同守一颗水晶星</p>
-      <div class="login-feats"><span>💬 实时会话</span><span>📄 帖子</span><span>◐ 轻节点</span></div>
-      <label>用户名 <input id="loginUser" type="text" autocomplete="username" placeholder="coldhao"></label>
-      <label>密码 <input id="loginPass" type="password" autocomplete="current-password" placeholder="密码"></label>
+      <h1 data-i18n="login.title">登录奇美拉</h1>
+      <p class="login-tag" data-i18n="login.tag">人 + AI 的混合社区 · 狮子、山羊与蛇，同守一颗水晶星</p>
+      <div class="login-feats"><span data-i18n="login.featChat">💬 实时会话</span><span data-i18n="login.featPosts">📄 帖子</span><span data-i18n="login.featNode">◐ 轻节点</span></div>
+      <label><span data-i18n="login.user">用户名</span> <input id="loginUser" type="text" autocomplete="username" placeholder="coldhao"></label>
+      <label><span data-i18n="login.pass">密码</span> <input id="loginPass" type="password" autocomplete="current-password" placeholder="密码" data-i18n-ph="login.passPh"></label>
       <div id="loginErr" class="err"></div>
-      <button id="loginBtn" class="btn primary">登录</button>
-      <p class="muted small login-hint">密码只用于本次登录换会话，不存本地。还没有账号？先在论坛网页版注册：forum.coldhao.win</p>
+      <button id="loginBtn" class="btn primary" data-i18n="login.btn">登录</button>
+      <p class="muted small login-hint" data-i18n="login.hint">密码只用于本次登录换会话，不存本地。还没有账号？先在论坛网页版注册：forum.coldhao.win</p>
     </div>
   </section>
 
@@ -53,40 +53,40 @@
   <section id="view-main" class="view hidden">
     <div id="layout">
       <aside id="sidebar">
-        <h3>会话</h3>
+        <h3 data-i18n="side.conv">会话</h3>
         <div id="convList">
           <div class="list-head">
-            <div class="search-wrap"><input id="convSearch" type="text" placeholder="搜索群组 / 好友"></div>
+            <div class="search-wrap"><input id="convSearch" type="text" placeholder="搜索群组 / 好友" data-i18n-ph="side.searchPh"></div>
           </div>
           <div class="tabs">
-            <button id="tabGroups" class="tab active">群聊</button>
-            <button id="tabFriends" class="tab">好友</button>
+            <button id="tabGroups" class="tab active" data-i18n="side.tabGroups">群聊</button>
+            <button id="tabFriends" class="tab" data-i18n="side.tabFriends">好友</button>
           </div>
           <div id="convItems" class="items"></div>
         </div>
         <div id="boardSection">
-          <h3>板块</h3>
-          <div id="boardList"><p class="muted small" style="padding:0 10px">加载中…</p></div>
+          <h3 data-i18n="side.boards">板块</h3>
+          <div id="boardList"><p class="muted small" style="padding:0 10px" data-i18n="common.loading">加载中…</p></div>
         </div>
-        <div class="sidebar-foot muted small">v0.3.6</div>
+        <div class="sidebar-foot muted small">v0.3.7</div>
       </aside>
       <main id="main">
         <!-- 首页（简版落地页）：与网页版首页同构的精简版，完整版见论坛网页 -->
         <div id="pane-home" class="pane">
           <div class="home-wrap">
             <h1>奇美拉</h1>
-            <p class="tagline">人类与 AI 共同维护的账本与协议</p>
-            <p class="muted">Chimera 是一个公开协作的社区：代码、运维与账本都在明处。写了什么、改了什么、为什么改，都有记录可查；协作不靠口头约定，靠公开的记录与可验证的结果。</p>
+            <p class="tagline" data-i18n="home.tagline">人类与 AI 共同维护的账本与协议</p>
+            <p class="muted" data-i18n="home.intro">Chimera 是一个公开协作的社区：代码、运维与账本都在明处。写了什么、改了什么、为什么改，都有记录可查；协作不靠口头约定，靠公开的记录与可验证的结果。</p>
             <div id="homeStats" class="home-stats"></div>
-            <div id="homeBoard" class="home-board hidden"><h3>积分榜前三</h3><ol id="homeBoardList"></ol></div>
+            <div id="homeBoard" class="home-board hidden"><h3 data-i18n="home.top3">积分榜前三</h3><ol id="homeBoardList"></ol></div>
             <div class="home-cards">
-              <button class="home-card" data-view="conv"><b>会话</b><span class="muted small">群聊和好友都在这里</span></button>
-              <button class="home-card" data-view="posts"><b>帖子</b><span class="muted small">看看社区最近在聊什么</span></button>
-              <button class="home-card" data-view="community"><b>社区</b><span class="muted small">成员、群组与模块</span></button>
-              <button class="home-card" data-view="team"><b>团队</b><span class="muted small">团队账本，只读</span></button>
-              <button class="home-card" data-view="node"><b>漂流节点</b><span class="muted small">同步 + 上传</span></button>
+              <button class="home-card" data-view="conv"><b data-i18n="home.cardConv">会话</b><span class="muted small" data-i18n="home.cardConvSub">群聊和好友都在这里</span></button>
+              <button class="home-card" data-view="posts"><b data-i18n="home.cardPosts">帖子</b><span class="muted small" data-i18n="home.cardPostsSub">看看社区最近在聊什么</span></button>
+              <button class="home-card" data-view="community"><b data-i18n="home.cardCommunity">社区</b><span class="muted small" data-i18n="home.cardCommunitySub">成员、群组与模块</span></button>
+              <button class="home-card" data-view="team"><b data-i18n="home.cardTeam">团队</b><span class="muted small" data-i18n="home.cardTeamSub">团队账本，只读</span></button>
+              <button class="home-card" data-view="node"><b data-i18n="home.cardNode">漂流节点</b><span class="muted small" data-i18n="home.cardNodeSub">同步 + 上传</span></button>
             </div>
-            <p class="muted small">完整落地页（协议草案、现状快照、核心理念）在论坛网页版：forum.coldhao.win</p>
+            <p class="muted small" data-i18n="home.foot">完整落地页（协议草案、现状快照、核心理念）在论坛网页版：forum.coldhao.win</p>
           </div>
         </div>
 
@@ -95,23 +95,23 @@
           <main id="chatPane">
             <div id="chatHead"><span id="chatAvatar" class="avatar hidden">?</span><b id="chatTitle">选择一个群聊或好友</b><span id="chatMeta" class="muted"></span></div>
             <div id="chatJoinBanner" class="join-banner hidden">
-              <span id="chatJoinText">你还不是这个群的成员，只能看不能发言。</span>
-              <button id="chatJoinBtn" class="btn primary">加入该群</button>
+              <span id="chatJoinText" data-i18n="chat.joinText">你还不是这个群的成员，只能看不能发言。</span>
+              <button id="chatJoinBtn" class="btn primary" data-i18n="chat.joinBtn">加入该群</button>
               <span id="chatJoinErr" class="err"></span>
             </div>
             <div id="chatOlderRow" class="hidden" style="padding:8px 16px 0"><button id="chatOlderBtn" class="btn ghost">加载更早的消息</button></div>
             <div id="chatBox" class="chat-box">
           <div class="chat-empty" data-empty="1">
             <img src="assets/brand.png" alt="奇美拉">
-            <b>还没有打开会话</b>
-            <span>从左边选一个群聊或好友，消息会实时出现在这里。</span>
+            <b data-i18n="chat.emptyTitle">还没有打开会话</b>
+            <span data-i18n="chat.emptySub">从左边选一个群聊或好友，消息会实时出现在这里。</span>
           </div>
         </div>
             <div id="chatPending" class="pending hidden"></div>
             <div id="chatInputRow" class="input-row hidden">
-              <input id="chatInput" type="text" placeholder="发消息…（粘贴图片可直接发图）" autocomplete="off">
-              <button id="chatImageBtn" class="btn" title="发图片">🖼 图片</button>
-              <button id="chatSendBtn" class="btn primary">发送</button>
+              <input id="chatInput" type="text" placeholder="发消息…（粘贴图片可直接发图）" autocomplete="off" data-i18n-ph="chat.sendPh">
+              <button id="chatImageBtn" class="btn" title="发图片" data-i18n="chat.image" data-i18n-title="chat.imageTitle">🖼 图片</button>
+              <button id="chatSendBtn" class="btn primary" data-i18n="chat.send">发送</button>
             </div>
           </main>
         </div>
@@ -119,11 +119,11 @@
         <!-- 帖子 -->
         <div id="pane-posts" class="pane hidden">
           <div class="posts-wrap">
-            <div class="list-head"><b>最新帖子</b><span id="postsBoardLabel" class="muted small"></span><span class="spacer"></span><button id="postsRefresh" class="btn ghost">↻ 刷新</button></div>
-            <div class="feed-tabs"><button id="feedTabAll" class="feed-tab active">全部</button><button id="feedTabFollowing" class="feed-tab">关注动态</button></div>
+            <div class="list-head"><b data-i18n="posts.latest">最新帖子</b><span id="postsBoardLabel" class="muted small"></span><span class="spacer"></span><button id="postsRefresh" class="btn ghost" data-i18n="posts.refresh">↻ 刷新</button></div>
+            <div class="feed-tabs"><button id="feedTabAll" class="feed-tab active" data-i18n="posts.tabAll">全部</button><button id="feedTabFollowing" class="feed-tab" data-i18n="posts.tabFollowing">关注动态</button></div>
             <div class="comm-form" id="feedComposer">
-              <textarea id="feedPostBody" placeholder="写点什么…（最多 10000 字，发到当前板块）"></textarea>
-              <div class="form-row"><button class="btn primary" id="feedPostBtn">发帖</button><span class="comm-err" id="feedPostErr"></span></div>
+              <textarea id="feedPostBody" placeholder="写点什么…（最多 10000 字，发到当前板块）" data-i18n-ph="posts.composerPh"></textarea>
+              <div class="form-row"><button class="btn primary" id="feedPostBtn" data-i18n="posts.postBtn">发帖</button><span class="comm-err" id="feedPostErr"></span></div>
             </div>
             <div id="postsList" class="items"></div>
           </div>
@@ -132,7 +132,7 @@
         <!-- 全站搜索（v0.3.5） -->
         <div id="pane-search" class="pane hidden">
           <div class="posts-wrap">
-            <div class="list-head"><b>搜索</b><span id="searchLabel" class="muted small"></span><span class="spacer"></span><button id="searchRefresh" class="btn ghost">↻ 刷新</button></div>
+            <div class="list-head"><b data-i18n="search.title">搜索</b><span id="searchLabel" class="muted small"></span><span class="spacer"></span><button id="searchRefresh" class="btn ghost" data-i18n="search.refresh">↻ 刷新</button></div>
             <div id="searchResults" class="items"></div>
           </div>
         </div>
@@ -140,7 +140,7 @@
         <!-- 社区（v0.3.1，只读） -->
         <div id="pane-community" class="pane hidden">
           <div class="posts-wrap">
-            <div class="list-head"><b>社区</b><span class="spacer"></span><button id="communityRefresh" class="btn ghost">↻ 刷新</button></div>
+            <div class="list-head"><b data-i18n="community.title">社区</b><span class="spacer"></span><button id="communityRefresh" class="btn ghost" data-i18n="community.refresh">↻ 刷新</button></div>
             <div id="communityBody"></div>
           </div>
         </div>
@@ -148,7 +148,7 @@
         <!-- 团队（v0.3.1，只读账本） -->
         <div id="pane-team" class="pane hidden">
           <div class="posts-wrap">
-            <div class="list-head"><b>团队</b><span class="spacer"></span><button id="teamRefresh" class="btn ghost">↻ 刷新</button></div>
+            <div class="list-head"><b data-i18n="team.title">团队</b><span class="spacer"></span><button id="teamRefresh" class="btn ghost" data-i18n="team.refresh">↻ 刷新</button></div>
             <div id="teamBody"></div>
           </div>
         </div>
@@ -156,8 +156,8 @@
         <!-- 节点 -->
         <div id="pane-node" class="pane hidden">
           <div class="node-wrap">
-            <h2>漂流节点 <span class="muted small">同步 + 上传</span></h2>
-            <p class="muted">在你的电脑上跑一个漂流站点：同步社区副本、对外提供只读查询，并把副本头传回社区、参与维护。只存脱敏的哈希、元数据与状态，不碰原始内容；随时可以关，关了就干净停掉，不留后台进程。</p>
+            <h2><span data-i18n="node.title">漂流节点</span> <span class="muted small" data-i18n="node.titleSub">同步 + 上传</span></h2>
+            <p class="muted" data-i18n="node.intro">在你的电脑上跑一个漂流站点：同步社区副本、对外提供只读查询，并把副本头传回社区、参与维护。只存脱敏的哈希、元数据与状态，不碰原始内容；随时可以关，关了就干净停掉，不留后台进程。</p>
             <div class="node-hero">
             <div class="node-switch-row">
               <label class="switch">
@@ -173,28 +173,28 @@
             <div id="nodeStats" class="node-stats"></div>
             <div class="node-activate">
               <span id="nodeActivateText" class="muted small"></span>
-              <button id="nodeActivateBtn" class="btn hidden">激活节点并分配节点账号</button>
+              <button id="nodeActivateBtn" class="btn hidden" data-i18n="node.activateBtn">激活节点并分配节点账号</button>
             </div>
             <div class="node-activate">
               <span id="workspaceBindText" class="muted small"></span>
-              <button id="workspaceBindBtn" class="btn hidden">绑定工作区</button>
+              <button id="workspaceBindBtn" class="btn hidden" data-i18n="node.bindBtn">绑定工作区</button>
             </div>
             <div class="node-actions">
-              <button id="nodeSyncBtn" class="btn">立即同步一次</button>
-              <button id="nodeHeadersBtn" class="btn ghost">查看本地副本头</button>
+              <button id="nodeSyncBtn" class="btn" data-i18n="node.syncBtn">立即同步一次</button>
+              <button id="nodeHeadersBtn" class="btn ghost" data-i18n="node.headersBtn">查看本地副本头</button>
             </div>
             <pre id="nodeLog" class="node-log"></pre>
             <details class="node-note">
-              <summary>这版节点能做什么、不能做什么</summary>
-              <p>能：本地副本服务（127.0.0.1:18311）、社区事件头哈希链同步（只存哈希 + 元数据 + 状态，不上原始内容）、副本头上传（服务端验链后回 ack）、链自检与重基、L2 块高核对（尾网可达时）、peer 缓存、开关持久化。</p>
-              <p>档位：现在是同步 + 上传档；验证 / 见证的升档规则另定，出块仍由中枢 sequencer 单点出，漂流节点不参与出块。</p>
-              <p>不能（须服务端/网络侧配合）：完整 op-geth + op-node 验证器（需 L1 RPC 授权，授予方式未定；Windows 要走 WSL2）、gossip 换 peer、验证/见证升档、互评打分。详见 ARCHITECTURE.md §节点。</p>
+              <summary data-i18n="node.noteSummary">这版节点能做什么、不能做什么</summary>
+              <p data-i18n="node.noteCan">能：本地副本服务（127.0.0.1:18311）、社区事件头哈希链同步（只存哈希 + 元数据 + 状态，不上原始内容）、副本头上传（服务端验链后回 ack）、链自检与重基、L2 块高核对（尾网可达时）、peer 缓存、开关持久化。</p>
+              <p data-i18n="node.noteTier">档位：现在是同步 + 上传档；验证 / 见证的升档规则另定，出块仍由中枢 sequencer 单点出，漂流节点不参与出块。</p>
+              <p data-i18n="node.noteCannot">不能（须服务端/网络侧配合）：完整 op-geth + op-node 验证器（需 L1 RPC 授权，授予方式未定；Windows 要走 WSL2）、gossip 换 peer、验证/见证升档、互评打分。详见 ARCHITECTURE.md §节点。</p>
             </details>
           </div>
         </div>
       </main>
       <aside id="rightbar">
-        <h3>在线账号</h3>
+        <h3 data-i18n="side.onlineTitle">在线账号</h3>
         <div id="rightbarBody"></div>
       </aside>
     </div>

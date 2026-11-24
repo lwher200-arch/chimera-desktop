@@ -1579,6 +1579,9 @@ async function main() {
       return m[0];
     };
     const escFn = new Function(`${extractFn('esc')}; return esc;`)();
+    // v0.3.7：抽出的函数里 chrome 文案走 ui(key)；直接注入真实翻译模块的 ui，
+    // 与线上一致（window.ChimeraTranslate 在时 renderer 的 ui 助手也是透传它）。
+    const tr = require('../renderer/translate.js');
     // messageHtml 自 v0.3.0 起还用 state.me（判自己的消息）、avatarHtml、fmtTime：
     // 抽出来时一并注入。§6 的假 state 从不设 me（没有一条是自己的消息），
     // 故这里传一个固定的 { me: null }，不随下面 state = freshState() 的重绑而变。
@@ -1586,7 +1589,7 @@ async function main() {
     const avatarInitialFn = new Function(`${extractFn('avatarInitial')}; return avatarInitial;`)();
     const avatarHtmlFn = new Function('avatarClass', 'avatarInitial', 'esc', `${extractFn('avatarHtml')}; return avatarHtml;`)(avatarClassFn, avatarInitialFn, escFn);
     const fmtTimeFn = new Function(`${extractFn('fmtTime')}; return fmtTime;`)();
-    const messageHtmlFn = new Function('esc', 'state', 'avatarHtml', 'fmtTime', `${extractFn('messageHtml')}; return messageHtml;`)(escFn, { me: null }, avatarHtmlFn, fmtTimeFn);
+    const messageHtmlFn = new Function('esc', 'state', 'avatarHtml', 'fmtTime', 'ui', `${extractFn('messageHtml')}; return messageHtml;`)(escFn, { me: null }, avatarHtmlFn, fmtTimeFn, tr.ui);
 
     function makeEl(cls, id, parent) {
       return {
@@ -1660,14 +1663,14 @@ async function main() {
       lastTs: null, renderedIds: new Set(), hasMoreOlder: false, loadingOlder: false,
     });
     let state = freshState();
-    const renderMessages = new Function('state', '$', 'messageHtml', 'MAX_RENDERED',
-      `${extractFn('renderMessages')}; return renderMessages;`)(state, $fake, messageHtmlFn, MAX_RENDERED);
+    const renderMessages = new Function('state', '$', 'messageHtml', 'MAX_RENDERED', 'ui',
+      `${extractFn('renderMessages')}; return renderMessages;`)(state, $fake, messageHtmlFn, MAX_RENDERED, tr.ui);
     const appendMessages = new Function('state', '$', 'messageHtml', 'MAX_RENDERED', 'NEAR_BOTTOM_PX',
       `${extractFn('appendMessages')}; return appendMessages;`)(state, $fake, messageHtmlFn, MAX_RENDERED, NEAR_BOTTOM_PX);
     const prependMessages = new Function('state', '$', 'messageHtml',
       `${extractFn('prependMessages')}; return prependMessages;`)(state, $fake, messageHtmlFn);
-    const syncOlderButton = new Function('state', '$',
-      `${extractFn('syncOlderButton')}; return syncOlderButton;`)(state, $fake);
+    const syncOlderButton = new Function('state', '$', 'ui',
+      `${extractFn('syncOlderButton')}; return syncOlderButton;`)(state, $fake, tr.ui);
 
     // 6a. 初拉 120 条：全渲染，水位为最后一条。
     renderMessages(Array.from({ length: 120 }, (_, i) => mkMsg(i + 1)));
@@ -1678,8 +1681,8 @@ async function main() {
 
     // 6b. 初拉 350 条（防御性上限）：只留最新 300 条，hasMoreOlder 为真。
     state = freshState();
-    const render2 = new Function('state', '$', 'messageHtml', 'MAX_RENDERED',
-      `${extractFn('renderMessages')}; return renderMessages;`)(state, $fake, messageHtmlFn, MAX_RENDERED);
+    const render2 = new Function('state', '$', 'messageHtml', 'MAX_RENDERED', 'ui',
+      `${extractFn('renderMessages')}; return renderMessages;`)(state, $fake, messageHtmlFn, MAX_RENDERED, tr.ui);
     render2(Array.from({ length: 350 }, (_, i) => mkMsg(i + 1)));
     assert.strictEqual(box.querySelectorAll('.msg').length, 300, '350 条初拉应只渲染 300 条');
     assert.strictEqual(box.querySelector('.msg').dataset.id, 'm51', '应留最新的 300 条（m51 起）');
@@ -1689,8 +1692,8 @@ async function main() {
     // 6c. 追加超上限：100 条初拉 + 250 条追加 → 留 300 条，最老的 50 条
     // 节点与 id 一起被裁掉，最新一条与水位 intact。
     state = freshState();
-    const render3 = new Function('state', '$', 'messageHtml', 'MAX_RENDERED',
-      `${extractFn('renderMessages')}; return renderMessages;`)(state, $fake, messageHtmlFn, MAX_RENDERED);
+    const render3 = new Function('state', '$', 'messageHtml', 'MAX_RENDERED', 'ui',
+      `${extractFn('renderMessages')}; return renderMessages;`)(state, $fake, messageHtmlFn, MAX_RENDERED, tr.ui);
     const append3 = new Function('state', '$', 'messageHtml', 'MAX_RENDERED', 'NEAR_BOTTOM_PX',
       `${extractFn('appendMessages')}; return appendMessages;`)(state, $fake, messageHtmlFn, MAX_RENDERED, NEAR_BOTTOM_PX);
     render3(Array.from({ length: 100 }, (_, i) => mkMsg(i + 1)));
@@ -1715,8 +1718,8 @@ async function main() {
 
     // 6e. 向前追加 2 条：插到顶上，scrollTop 按插入高度补偿，id 补进 Set。
     state = freshState();
-    const render5 = new Function('state', '$', 'messageHtml', 'MAX_RENDERED',
-      `${extractFn('renderMessages')}; return renderMessages;`)(state, $fake, messageHtmlFn, MAX_RENDERED);
+    const render5 = new Function('state', '$', 'messageHtml', 'MAX_RENDERED', 'ui',
+      `${extractFn('renderMessages')}; return renderMessages;`)(state, $fake, messageHtmlFn, MAX_RENDERED, tr.ui);
     const prepend5 = new Function('state', '$', 'messageHtml',
       `${extractFn('prependMessages')}; return prependMessages;`)(state, $fake, messageHtmlFn);
     render5(Array.from({ length: 100 }, (_, i) => mkMsg(101 + i))); // m101..m200
@@ -1754,12 +1757,12 @@ async function main() {
       };
       const fakeWindow = { chimera: { api: fakeApi } };
       state = freshState();
-      const render6 = new Function('state', '$', 'messageHtml', 'MAX_RENDERED',
-        `${extractFn('renderMessages')}; return renderMessages;`)(state, $fake, messageHtmlFn, MAX_RENDERED);
+      const render6 = new Function('state', '$', 'messageHtml', 'MAX_RENDERED', 'ui',
+        `${extractFn('renderMessages')}; return renderMessages;`)(state, $fake, messageHtmlFn, MAX_RENDERED, tr.ui);
       const prepend6 = new Function('state', '$', 'messageHtml',
         `${extractFn('prependMessages')}; return prependMessages;`)(state, $fake, messageHtmlFn);
-      const sync6 = new Function('state', '$',
-        `${extractFn('syncOlderButton')}; return syncOlderButton;`)(state, $fake);
+      const sync6 = new Function('state', '$', 'ui',
+        `${extractFn('syncOlderButton')}; return syncOlderButton;`)(state, $fake, tr.ui);
       const loadOlder = new Function('state', '$', 'window', 'prependMessages', 'syncOlderButton', 'MAX_RENDERED', 'PAGE_SIZE',
         `${extractFn('loadOlderMessages')}; return loadOlderMessages;`)(state, $fake, fakeWindow, prepend6, sync6, MAX_RENDERED, PAGE_SIZE);
       render6(serverMsgs.slice(-100)); // 初拉最新 100 条 m151..m250
@@ -1782,12 +1785,12 @@ async function main() {
 
       // 上限守卫：已渲染 300 条时点翻页，直接关按钮、不发请求。
       state = freshState();
-      const render7 = new Function('state', '$', 'messageHtml', 'MAX_RENDERED',
-        `${extractFn('renderMessages')}; return renderMessages;`)(state, $fake, messageHtmlFn, MAX_RENDERED);
+      const render7 = new Function('state', '$', 'messageHtml', 'MAX_RENDERED', 'ui',
+        `${extractFn('renderMessages')}; return renderMessages;`)(state, $fake, messageHtmlFn, MAX_RENDERED, tr.ui);
       const prepend7 = new Function('state', '$', 'messageHtml',
         `${extractFn('prependMessages')}; return prependMessages;`)(state, $fake, messageHtmlFn);
-      const sync7 = new Function('state', '$',
-        `${extractFn('syncOlderButton')}; return syncOlderButton;`)(state, $fake);
+      const sync7 = new Function('state', '$', 'ui',
+        `${extractFn('syncOlderButton')}; return syncOlderButton;`)(state, $fake, tr.ui);
       const loadOlder7 = new Function('state', '$', 'window', 'prependMessages', 'syncOlderButton', 'MAX_RENDERED', 'PAGE_SIZE',
         `${extractFn('loadOlderMessages')}; return loadOlderMessages;`)(state, $fake, fakeWindow, prepend7, sync7, MAX_RENDERED, PAGE_SIZE);
       render7(Array.from({ length: 350 }, (_, i) => mkMsg(i + 1))); // 裁到 300 条
@@ -1802,8 +1805,8 @@ async function main() {
 
     // 6g. 按钮三态：有更早→显示可点；加载中→禁用“加载中…”；无更早→隐藏。
     state = freshState();
-    const syncG = new Function('state', '$',
-      `${extractFn('syncOlderButton')}; return syncOlderButton;`)(state, $fake);
+    const syncG = new Function('state', '$', 'ui',
+      `${extractFn('syncOlderButton')}; return syncOlderButton;`)(state, $fake, tr.ui);
     state.hasMoreOlder = true;
     syncG();
     assert.strictEqual(rowEl._hidden, false, '有更早时按钮行应显示');
@@ -2748,7 +2751,7 @@ async function main() {
     const avatarInitialFn = new Function(`${extractFn('avatarInitial')}; return avatarInitial;`)();
     const avatarHtmlFn = new Function('avatarClass', 'avatarInitial', 'esc', `${extractFn('avatarHtml')}; return avatarHtml;`)(avatarClassFn, avatarInitialFn, escFn);
     const fmtTimeFn = new Function(`${extractFn('fmtTime')}; return fmtTime;`)();
-    const messageHtmlFn = new Function('esc', 'state', 'avatarHtml', 'fmtTime', `${extractFn('messageHtml')}; return messageHtml;`)(escFn, { me: null }, avatarHtmlFn, fmtTimeFn);
+    const messageHtmlFn = new Function('esc', 'state', 'avatarHtml', 'fmtTime', 'ui', `${extractFn('messageHtml')}; return messageHtml;`)(escFn, { me: null }, avatarHtmlFn, fmtTimeFn, tr.ui);
     const msg = { id: 'm1', author: 'alice', ts: new Date().toISOString(), body: 'Hello everyone, this is an English message.' };
     const plain = messageHtmlFn(msg);
     assert.ok(!plain.includes('trbox'), '无翻译模块时消息不应带翻译框');
@@ -2800,6 +2803,90 @@ async function main() {
       '未登录翻译应回 401',
     );
     ok('live POST /api/translate：未登录回 401（M3 须登录）');
+  }
+
+  console.log('== 12. 界面自适应翻译 chrome i18n（v0.3.7）==');
+  // 12a. 字典完备性：中英 key 齐全、值非空、%s 个数一致（uiFmt 顺序代入）。
+  {
+    const zhKeys = Object.keys(tr._uiStrings.zh).sort();
+    const enKeys = Object.keys(tr._uiStrings.en).sort();
+    assert.deepStrictEqual(enKeys, zhKeys, '中英文 UI 字典 key 应完全一致');
+    for (const k of zhKeys) {
+      assert.strictEqual(typeof tr._uiStrings.zh[k], 'string', `${k} 中文值应为字符串`);
+      assert.ok(tr._uiStrings.zh[k].length > 0, `${k} 中文值不应为空串`);
+      assert.strictEqual(typeof tr._uiStrings.en[k], 'string', `${k} 英文值应为字符串`);
+      assert.ok(tr._uiStrings.en[k].length > 0, `${k} 英文值不应为空串`);
+      const cz = (tr._uiStrings.zh[k].match(/%s/g) || []).length;
+      const ce = (tr._uiStrings.en[k].match(/%s/g) || []).length;
+      assert.strictEqual(ce, cz, `${k} 中英 %s 个数应一致（zh ${cz} / en ${ce}）`);
+    }
+    for (const k of ['community.switchTeam', 'node.countItems', 'node.countTimes', 'top.connStatus']) {
+      assert.ok(tr._uiStrings.zh[k] && tr._uiStrings.en[k], `字典应含 ${k}`);
+    }
+    ok(`UI 字典完备：中英各 ${zhKeys.length} 个 key，值非空，%s 个数一致`);
+  }
+  // 12b. ui / uiFmt：当前语言默认中文、显式语言取对应文案、缺 key 回 key 本身。
+  {
+    assert.strictEqual(tr.ui('nav.home'), '首页', 'Node 下无 localStorage 默认中文');
+    assert.strictEqual(tr.ui('nav.home', 'en'), 'Home', '显式 en 应取英文');
+    assert.strictEqual(tr.ui('top.langZh'), '翻译：中文', '语言按钮中文文案');
+    assert.strictEqual(tr.ui('top.themeDark', 'en'), '🌙 Dark', '主题按钮英文文案');
+    assert.strictEqual(tr.ui('no.such.key'), 'no.such.key', '缺 key 应回 key 本身');
+    assert.strictEqual(tr.uiFmt('search.postsSec', 5), '帖子（5）', 'uiFmt 应顺序代入 %s');
+    assert.strictEqual(tr.uiFmt('profile.stats', 10, 20, 30, 40), '帖子 10 · 回复 20 · 消息 30 · 获赞 40', 'uiFmt 多参数顺序代入');
+    assert.strictEqual(tr.uiFmt('node.countItems', 3), '3 条', 'node.countItems 中文');
+    assert.strictEqual(tr.ui('node.countItems', 'en').replace('%s', '3'), '3 items', 'node.countItems 英文模板');
+    assert.strictEqual(tr.uiFmt('community.meta', 'coldhao', 5, 2), '创建人 coldhao · 成员 5 人 · 下挂 2 个群', 'community.meta 三参数');
+    ok('ui / uiFmt：默认中文、显式语言、缺 key 回 key、%s 顺序代入');
+  }
+  // 12c. applyUiLang 在假 document 上：文本/placeholder/title 双语切换 + html lang。
+  {
+    const makeEl = (key) => ({
+      _text: '', _attrs: { 'data-i18n': key, 'data-i18n-ph': key, 'data-i18n-title': key },
+      get textContent() { return this._text; },
+      set textContent(v) { this._text = v; },
+      getAttribute(k) { return this._attrs[k] || null; },
+      setAttribute(k, v) { this._attrs[k] = v; },
+    });
+    const textEls = [makeEl('nav.home'), makeEl('side.conv')];
+    const phEls = [makeEl('top.searchPh')];
+    const titleEls = [makeEl('top.connStatus')];
+    const doc = {
+      querySelectorAll: (sel) => ({ '[data-i18n]': textEls, '[data-i18n-ph]': phEls, '[data-i18n-title]': titleEls }[sel] || []),
+      documentElement: { _attrs: {}, setAttribute(k, v) { this._attrs[k] = v; } },
+    };
+    tr.applyUiLang(doc, 'en');
+    assert.strictEqual(textEls[0].textContent, 'Home', '英文下 nav.home 应为 Home');
+    assert.strictEqual(textEls[1].textContent, 'Chats', '英文下 side.conv 应为 Chats');
+    assert.strictEqual(phEls[0]._attrs.placeholder, 'Search posts and messages…', '英文下搜索 placeholder 应切换');
+    assert.strictEqual(titleEls[0]._attrs.title, 'Realtime connection status', '英文下连接状态 title 应切换');
+    assert.strictEqual(doc.documentElement._attrs.lang, 'en', '英文下 html lang 应为 en');
+    tr.applyUiLang(doc, 'zh');
+    assert.strictEqual(textEls[0].textContent, '首页', '切回中文 nav.home 应为首页');
+    assert.strictEqual(phEls[0]._attrs.placeholder, '搜索帖子与消息…', '切回中文 placeholder 应恢复');
+    assert.strictEqual(doc.documentElement._attrs.lang, 'zh-CN', '中文下 html lang 应为 zh-CN');
+    assert.doesNotThrow(() => tr.applyUiLang(null), 'doc 为 null 不应抛错');
+    assert.doesNotThrow(() => tr.applyUiLang({}), '无 querySelectorAll 的 doc 不应抛错');
+    ok('applyUiLang：假 document 上文本/placeholder/title 双语切换 + html lang');
+  }
+  // 12d. renderer.js 的 ui/uiFmt 助手：无模块时回 key 本身，有模块时透传。
+  {
+    const rendererSrc = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'renderer.js'), 'utf8');
+    const extractFn = (name) => {
+      const m = rendererSrc.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n\\}`));
+      assert.ok(m, `renderer.js 应包含 ${name}`);
+      return m[0];
+    };
+    const uiFn = new Function(`${extractFn('ui')}; return ui;`)();
+    const uiFmtFn = new Function(`${extractFn('uiFmt')}; return uiFmt;`)();
+    assert.strictEqual(uiFn('nav.home'), 'nav.home', '无 ChimeraTranslate 时 ui 应回 key 本身');
+    assert.strictEqual(uiFmtFn('search.postsSec', 5), 'search.postsSec', '无模块时 uiFmt 应回 key 本身');
+    globalThis.window = { ChimeraTranslate: tr };
+    try {
+      assert.strictEqual(uiFn('nav.home'), '首页', '有模块时 ui 应透传中文文案');
+      assert.strictEqual(uiFmtFn('home.points', 209), '209 分', '有模块时 uiFmt 应透传并代入');
+    } finally { delete globalThis.window; }
+    ok('renderer.js ui/uiFmt：无模块回 key、有模块透传');
   }
 
   console.log(`\nPASS: ${passed} 项全过`);
