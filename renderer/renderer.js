@@ -429,9 +429,9 @@ function syncOlderButton() {
 
 $('chatOlderBtn').addEventListener('click', loadOlderMessages);
 
-// 未加入横幅（v0.3.1）：非成员看得到消息、发不了言；加入按钮走
-// POST /api/groups/:id/members。服务端口径：公开群只有现有成员能拉人，
-// 非成员自加回 403——失败时把服务端原话展示出来，不自己编理由。
+// 未加入横幅（v0.3.1，v0.3.2 改走 /join）：非成员看得到消息、发不了言；
+// 加入按钮走 POST /api/groups/:id/join。服务端口径：公开群任何登录用户
+// 可自加；私密群回 403——失败时把服务端原话展示出来，不自己编理由。
 function syncJoinBanner(kind, member) {
   const banner = $('chatJoinBanner');
   const row = $('chatInputRow');
@@ -462,7 +462,7 @@ $('chatJoinBtn').addEventListener('click', async () => {
     renderConvList();
     await openConv('group', state.open.id);
   } catch (err) {
-    $('chatJoinErr').textContent = '加入失败：' + (err.message || err) + '（服务端口径：公开群只有现有成员能拉人，非成员无法自行加入，可请群成员拉你入群）';
+    $('chatJoinErr').textContent = '加入失败：' + (err.message || err) + '（公开群可直接加入；私密群须由成员或站长拉你入群）';
     btn.disabled = false;
     btn.textContent = '加入该群';
   }

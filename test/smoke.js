@@ -51,7 +51,8 @@ function startMockSeed() {
 
 // Mock 论坛（仅 §3b 节点上传测试用）：/api/health + /api/node/headers
 // （按真实服务端口径验链：401/403/409/400 + ack）+ /api/heartbeat +
-// /api/stream（SSE：hello 后发 seq 101 再跳到 104，供 gap 测试）。
+// /api/stream（SSE：hello 后发 seq 101 再跳到 104，供 gap 测试）+
+// POST /api/groups/:id/join（v0.3.2 自加入群：公开群 200、私密群 403）。
 // 只有 token 'test-node-token' 是节点身份；'test-ai-token' 是 AI 账号（403）。
 // state 暴露出来供测试断言与预置（setNodeState 模拟服务端超前）。
 function startMockForum() {
@@ -84,6 +85,12 @@ function startMockForum() {
         }
         state.heartbeats += 1;
         res.end(JSON.stringify({ ok: true, lastActiveTs: new Date().toISOString(), online: true })); return;
+      }
+      const joinM = /^\/api\/groups\/([^/]+)\/join$/.exec(url.pathname);
+      if (req.method === 'POST' && joinM) {
+        if (!req.headers.authorization) { res.writeHead(401); res.end(JSON.stringify({ ok: false, error: 'login required' })); return; }
+        if (joinM[1] === 'grp-private') { res.writeHead(403); res.end(JSON.stringify({ ok: false, error: 'private group: only members or the forum owner can add you' })); return; }
+        res.end(JSON.stringify({ ok: true, group: { id: joinM[1], name: 'mock-group', members: [{ name: 'me', type: 'human', joinedTs: new Date().toISOString() }] } })); return;
       }
       if (url.pathname === '/api/node/headers') {
         if (req.method === 'GET') {
@@ -388,6 +395,23 @@ async function main() {
     assert.strictEqual(gap.transport, 'sse', '缺口应在 SSE 路上');
     rt.stop();
     ok(`SSE 缺口：seq 101 → 104 触发 gap 事件（expected=${gap.expected}, got=${gap.got}）`);
+
+    // (f) 自加入群（v0.3.2）：公开群 /join 应 200；私密群应 403 且原话透传；无 token 应 401。
+    const mockClient = new ForumClient(forumUrl);
+    const joined = await withTimeout(mockClient.joinGroup('test-token', 'grp-public'), 15000, 'POST /api/groups/:id/join');
+    assert.strictEqual(joined.ok, true, '公开群自加应回 ok');
+    assert.strictEqual(joined.group.id, 'grp-public', '回包 group id 应与请求一致');
+    ok('自加入群：公开群 /join 回 200');
+    await assert.rejects(
+      withTimeout(mockClient.joinGroup('test-token', 'grp-private'), 15000, 'POST /api/groups/:id/join 私密群'),
+      (e) => e.status === 403 && /private group/.test(e.message),
+    );
+    ok('自加入群：私密群 /join 回 403，原话透传');
+    await assert.rejects(
+      withTimeout(mockClient.joinGroup(null, 'grp-public'), 15000, 'POST /api/groups/:id/join 无 token'),
+      (e) => e.status === 401,
+    );
+    ok('自加入群：无 token 回 401');
   } finally {
     forum.close();
     fs.rmSync(tmp3b, { recursive: true, force: true });

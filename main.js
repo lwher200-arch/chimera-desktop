@@ -232,9 +232,9 @@ function registerIpc() {
   ipcMain.handle('api:community', (_e, { id }) => client.getCommunity(sessionToken(), id));
   ipcMain.handle('api:community-ledger', (_e, { id, limit }) =>
     client.getCommunityLedger(sessionToken(), id, { limit }));
-  // 加群（v0.3.1）：以当前登录用户名自加；服务端不放行时原样抛错，渲染进程展示原话。
+  // 加群（v0.3.2）：调 /join 自加（服务端按调用方身份加人）；服务端不放行时原样抛错，渲染进程展示原话。
   ipcMain.handle('api:join-group', (_e, { groupId }) =>
-    client.joinGroup(sessionToken(), groupId, store.state.session?.username));
+    client.joinGroup(sessionToken(), groupId));
   ipcMain.handle('api:upload', (_e, { filePath }) => client.uploadFile(sessionToken(), filePath));
   ipcMain.handle('api:upload-blob', async (_e, { name, base64 }) => {
     // 粘贴图片 / 文件选择器拿到的 File 只有内存数据，没有磁盘路径：
