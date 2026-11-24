@@ -49,6 +49,12 @@ const state = {
   communities: [],
   teamLedger: [],
   teamLoaded: false,
+  teamPosts: [], // GET /api/communities/:id/posts 团队讨论
+  teamPostsLoaded: false,
+  teamQuery: '', // 讨论区搜索
+  replyingTo: null, // 正在回的那条团队帖 id
+  editingGroups: false, // 是否在编辑关联群组
+  showCreateTeam: false, // 是否展开新建团队表单
   lang: 'zh', // 翻译目标语言，默认中文（localStorage chimera_lang）
 };
 
@@ -214,9 +220,29 @@ async function loadAll() {
     try { state.dms = (await window.chimera.api.dms()).dms || []; } catch { state.dms = []; }
     renderConvList();
     renderRightbar();
+    loadHomeStats();
   } catch (err) {
     $('convItems').innerHTML = `<div class="muted" style="padding:12px">加载失败：${esc(err.message || err)}</div>`;
   }
+}
+
+// 首页数据化（v0.3.4）：健康计数 + 积分榜前三；任一失败只留空，不挡主界面。
+async function loadHomeStats() {
+  const box = $('homeStats');
+  if (!box) return;
+  try {
+    const h = await window.chimera.api.health();
+    const counts = [['帖子', h.posts], ['群组', h.groups], ['账号', h.accounts], ['消息', h.messages]];
+    box.innerHTML = counts.map(([label, n]) => `<div class="home-stat"><b>${typeof n === 'number' ? n : '—'}</b><span>${label}</span></div>`).join('');
+  } catch { box.innerHTML = ''; }
+  try {
+    const lb = await window.chimera.api.leaderboard(3);
+    const rows = (lb && lb.leaders) || [];
+    if (Array.isArray(rows) && rows.length) {
+      $('homeBoard').classList.remove('hidden');
+      $('homeBoardList').innerHTML = rows.slice(0, 3).map((r) => `<li>${esc(r.name || '')} · ${esc(String(r.points ?? ''))} 分</li>`).join('');
+    }
+  } catch { /* 榜单拉不到就不显示，不挡首页 */ }
 }
 
 // 板块常驻（v0.3.1）：直接取 GET /api/boards 全量板块；拉失败明说原因、
@@ -698,7 +724,29 @@ async function loadPosts() {
   }
 }
 
-// ---------- 社区 / 团队（v0.3.1，只读 v1，不做管理操作） ----------
+// ---------- 社区 / 团队（v0.3.1 只读 v1；v0.3.4 可交互） ----------
+// 角色口径与服务端一致：创建人 creator、团队内 admin、普通 member、非成员 null；
+// 站长 coldhao 在管理判定上与创建人同权（服务端 isOwner 同口径）。
+function teamRole(community, me) {
+  if (!community || !me || !me.username) return null;
+  if (community.creator === me.username) return 'creator';
+  const m = (community.members || []).find((x) => x.name === me.username);
+  if (!m) return null;
+  return m.role === 'admin' ? 'admin' : 'member';
+}
+function isForumOwner(me) { return !!(me && me.username === 'coldhao'); }
+// 加人/删人：创建人、站长、或团队内 admin。
+function canAdminTeam(community, me) {
+  const r = teamRole(community, me);
+  return r === 'creator' || r === 'admin' || isForumOwner(me);
+}
+// 公告/关联群组/改角色：创建人、站长（改角色仅创建人，见 setRole）。
+function canManageTeam(community, me) {
+  const r = teamRole(community, me);
+  return r === 'creator' || isForumOwner(me);
+}
+function isTeamMember(community, me) { return teamRole(community, me) !== null; }
+
 async function loadCommunity() {
   const box = $('communityBody');
   if (state.community) { renderCommunity(); return; }
@@ -710,10 +758,82 @@ async function loadCommunity() {
     if (!eterna) { box.innerHTML = '<div class="empty-note">暂无社区</div>'; return; }
     const detail = await window.chimera.api.community(eterna.id);
     state.community = detail.community || detail;
+    state.teamPosts = []; state.teamPostsLoaded = false;
     renderCommunity();
+    loadTeamPosts();
   } catch (err) {
     box.innerHTML = `<div class="muted" style="padding:12px">加载失败：${esc(err.message || err)}</div>`;
   }
+}
+
+async function switchTeam(id) {
+  if (!id || (state.community && state.community.id === id)) return;
+  state.community = null; state.teamPosts = []; state.teamPostsLoaded = false;
+  state.teamLoaded = false; state.teamLedger = []; state.replyingTo = null; state.editingGroups = false;
+  try {
+    const detail = await window.chimera.api.community(id);
+    state.community = detail.community || detail;
+    renderCommunity();
+    loadTeamPosts();
+  } catch (err) {
+    $('communityBody').innerHTML = `<div class="muted" style="padding:12px">加载失败：${esc(err.message || err)}</div>`;
+  }
+}
+
+// 团队讨论列表：成员 only；非成员服务端回 403，这里明说，不编理由。
+async function loadTeamPosts() {
+  const c = state.community;
+  if (!c) return;
+  const id = c.id;
+  const box = $('teamPostsList');
+  if (box) box.innerHTML = '<div class="muted small">讨论加载中…</div>';
+  try {
+    const data = await window.chimera.api.communityPosts(id, { limit: 50, q: state.teamQuery || null });
+    // 切队竞态：回包时当前队已变就丢弃，不盖新队的列表。
+    if (!state.community || state.community.id !== id) return;
+    state.teamPosts = data.posts || [];
+    state.teamPostsLoaded = true;
+    renderTeamPosts();
+  } catch (err) {
+    state.teamPosts = []; state.teamPostsLoaded = false;
+    if (box) box.innerHTML = `<div class="muted small">讨论加载失败：${esc(err.message || err)}</div>`;
+  }
+}
+
+function renderTeamPosts() {
+  const box = $('teamPostsList');
+  if (!box) return;
+  const posts = state.teamPosts || [];
+  if (!posts.length) {
+    box.innerHTML = '<div class="empty-note">暂无讨论帖</div>';
+    return;
+  }
+  const me = state.me;
+  const c = state.community;
+  const admin = canAdminTeam(c, me);
+  box.innerHTML = posts.map((p) => {
+    const mine = me && p.author === me.username;
+    const liked = me && (p.likedBy || []).includes(me.username);
+    const canPin = mine || admin;
+    return `<div class="post-card" data-post="${esc(p.id)}">
+      <b>${p.pinned ? '📌 ' : ''}${esc(p.title || '')}</b>
+      <div class="post-meta">${avatarHtml(p.author || '?', 'avatar-sm')}<span>${esc(p.author || '')} · ${esc(fmtTime(p.ts))}</span>${p.reply_to ? `<span>回复 @${esc(p.reply_to_author || '')}</span>` : ''}</div>
+      <div class="post-excerpt">${esc(p.body || '')}</div>${trPlaceholder(p.body || '')}
+      <div class="post-actions">
+        <button class="btn ghost" data-action="like-post" data-id="${esc(p.id)}">${liked ? '❤️ 已赞' : '🤍 点赞'} ${p.likesCount || 0}</button>
+        <button class="btn ghost" data-action="reply-post" data-id="${esc(p.id)}">💬 回复 ${p.replyCount || 0}</button>
+        ${canPin ? `<button class="btn ghost" data-action="pin-post" data-id="${esc(p.id)}">${p.pinned ? '取消置顶' : '置顶'}</button>` : ''}
+        ${mine ? `<button class="btn ghost" data-action="delete-post" data-id="${esc(p.id)}">删除</button>` : ''}
+        <span class="comm-err" data-post-err="${esc(p.id)}"></span>
+      </div>
+      ${state.replyingTo === p.id ? `<div class="comm-form" style="margin-top:8px">
+        <textarea id="replyBody-${esc(p.id)}" placeholder="回复 @${esc(p.author || '')}…"></textarea>
+        <div class="form-row"><button class="btn primary" data-action="submit-reply" data-id="${esc(p.id)}">发送回复</button>
+        <button class="btn ghost" data-action="cancel-reply">取消</button></div>
+      </div>` : ''}
+    </div>`;
+  }).join('');
+  if (window.ChimeraTranslate) window.ChimeraTranslate.observeTranslations(box);
 }
 
 function renderCommunity() {
@@ -724,26 +844,269 @@ function renderCommunity() {
   const groups = c.groups || [];
   const modules = c.modules_enabled || [];
   const anns = c.announcements || [];
+  const me = state.me;
+  const role = teamRole(c, me);
+  const admin = canAdminTeam(c, me);
+  const manage = canManageTeam(c, me);
+  const member = isTeamMember(c, me);
+  const isCreator = role === 'creator';
   box.innerHTML = `
     <div class="comm-head"><h2>${esc(c.title || c.name || '社区')}</h2>
     <p class="muted">${esc(c.description || '')}</p>
-    <div class="comm-meta muted small">创建人 ${esc(c.creator || '')} · 成员 ${members.length} 人 · 下挂 ${groups.length} 个群</div></div>
-    <h3>模块</h3>
-    <div class="chip-row">${modules.map((m) => `<span class="chip">${esc(m)}</span>`).join('') || '<span class="muted small">无</span>'}</div>
-    <h3>公告</h3>
-    ${anns.map((a) => `<div class="ann-card"><div class="post-meta">${avatarHtml(a.author || '?', 'avatar-sm')}<span>${esc(a.author || '')} · ${esc(fmtTime(a.ts))}</span></div><div>${esc(a.body || '')}</div>${trPlaceholder(a.body || '')}</div>`).join('') || '<div class="muted small">暂无公告</div>'}
-    <h3>成员</h3>
-    <div class="member-list">${members.map((m) => `<div class="member-item">${avatarHtml(m.name)}<div class="item-main"><div class="item-name"><b>${esc(m.name)}</b><span class="muted small">${esc(m.role || 'member')} · ${m.type === 'human' ? '人类' : 'AI'}</span></div></div></div>`).join('')}</div>
-    <h3>下挂群组</h3>
-    <div class="group-list">${groups.map((g) => `<div class="item" data-gid="${esc(g.id)}">${avatarHtml(g.name)}<div class="item-main"><div class="item-name"><b>${esc(g.name)}</b></div><span class="item-sub">${esc(g.kind || '')}${g.visibility === 'private' ? ' · 私密' : ''}</span></div></div>`).join('') || '<div class="muted small">暂无群组</div>'}</div>`;
+    <div class="comm-meta muted small">创建人 ${esc(c.creator || '')} · 成员 ${members.length} 人 · 下挂 ${groups.length} 个群${role ? ' · 你是' + ({ creator: '创建人', admin: '管理员', member: '成员' }[role] || role) : ' · 你还不是成员'}</div></div>
+    <div class="comm-form"><div class="form-row">
+      <select id="teamSelect" title="切换团队">${(state.communities || []).map((t) => `<option value="${esc(t.id)}" ${t.id === c.id ? 'selected' : ''}>${esc(t.title || t.name)}</option>`).join('')}</select>
+      <button class="btn" data-action="toggle-create-team">新建团队</button>
+      <input type="text" id="joinCodeInput" placeholder="邀请码" style="max-width:140px">
+      <button class="btn" data-action="join-code">凭邀请码加入</button>
+      <span class="comm-err" id="commTopErr"></span>
+    </div></div>
+    ${state.showCreateTeam ? `<div class="comm-form" id="createTeamForm">
+      <div class="form-row"><input type="text" id="newTeamName" placeholder="团队名（2..32，小写字母/数字/-/ _）"><input type="text" id="newTeamTitle" placeholder="标题（可空）"></div>
+      <textarea id="newTeamDesc" placeholder="简介（可空，最多 500 字）"></textarea>
+      <div class="form-row"><button class="btn primary" data-action="create-team">创建团队</button>
+      <button class="btn ghost" data-action="toggle-create-team">取消</button>
+      <span class="comm-err" id="createTeamErr"></span></div>
+    </div>` : ''}
+    <div class="comm-section"><h3>讨论区</h3>
+      <div class="comm-form"><div class="form-row">
+        <input type="text" id="teamSearch" placeholder="搜标题 / 正文 / 作者" value="${esc(state.teamQuery || '')}">
+        <button class="btn" data-action="search-posts">搜索</button>
+        <button class="btn ghost" data-action="refresh-posts">↻ 刷新</button>
+      </div></div>
+      <div id="teamPostsList"><div class="muted small">讨论加载中…</div></div>
+      ${member ? `<div class="comm-form">
+        <input type="text" id="newPostTitle" placeholder="标题（可空，最多 100 字）">
+        <textarea id="newPostBody" placeholder="写点什么…（最多 10000 字）"></textarea>
+        <div class="form-row"><button class="btn primary" data-action="new-post">发帖到讨论区</button>
+        <span class="comm-err" id="newPostErr"></span></div>
+      </div>` : '<p class="muted small">仅团队成员可在讨论区发帖；先加入团队。</p>'}
+    </div>
+    <div class="comm-section"><h3>公告</h3>
+    ${anns.map((a) => `<div class="ann-card"><div class="post-meta">${avatarHtml(a.author || '?', 'avatar-sm')}<span>${esc(a.author || '')} · ${esc(fmtTime(a.ts))}</span>${manage ? `<button class="btn ghost" data-action="delete-ann" data-id="${esc(a.id || a.annId || '')}" style="margin-left:auto;padding:2px 8px;font-size:12px">删除</button>` : ''}</div><div>${esc(a.body || '')}</div>${trPlaceholder(a.body || '')}</div>`).join('') || '<div class="muted small">暂无公告</div>'}
+    ${manage ? `<div class="comm-form"><textarea id="newAnnBody" placeholder="发一条公告（最多 2000 字，团队最多留 5 条）"></textarea>
+      <div class="form-row"><button class="btn" data-action="publish-ann">发布公告</button>
+      <span class="comm-err" id="newAnnErr"></span></div></div>` : ''}
+    </div>
+    <div class="comm-section"><h3>成员</h3>
+    <div class="member-list">${members.map((m) => {
+      const mIsCreator = m.name === c.creator;
+      const badge = mIsCreator ? '创建人' : (m.role === 'admin' ? '管理员' : '成员');
+      const badgeCls = mIsCreator ? 'creator' : (m.role === 'admin' ? 'admin' : '');
+      return `<div class="member-item">${avatarHtml(m.name)}<div class="item-main"><div class="item-name"><b>${esc(m.name)}</b><span class="role-badge ${badgeCls}">${badge}</span><span class="muted small">${m.type === 'human' ? '人类' : 'AI'}</span></div></div>
+      <span class="member-actions">
+        ${isCreator && !mIsCreator ? `<select data-action="set-role" data-name="${esc(m.name)}" title="改角色"><option value="member" ${m.role !== 'admin' ? 'selected' : ''}>成员</option><option value="admin" ${m.role === 'admin' ? 'selected' : ''}>管理员</option></select>` : ''}
+        ${admin && !mIsCreator ? `<button class="btn ghost" data-action="remove-member" data-name="${esc(m.name)}">移出</button>` : ''}
+      </span></div>`;
+    }).join('')}</div>
+    ${admin ? `<div class="comm-form"><div class="form-row">
+      <input type="text" id="addMemberName" placeholder="账号名">
+      <select id="addMemberType"><option value="ai">AI</option><option value="human">人类</option></select>
+      <button class="btn" data-action="add-member">拉进团队</button>
+      <span class="comm-err" id="addMemberErr"></span></div></div>` : ''}
+    </div>
+    <div class="comm-section"><h3>下挂群组</h3>
+    <div class="group-list">${groups.map((g) => `<div class="item" data-gid="${esc(g.id)}">${avatarHtml(g.name)}<div class="item-main"><div class="item-name"><b>${esc(g.name)}</b></div><span class="item-sub">${esc(g.kind || '')}${g.visibility === 'private' ? ' · 私密' : ''}</span></div></div>`).join('') || '<div class="muted small">暂无群组</div>'}</div>
+    ${manage ? `<div class="form-row"><button class="btn" data-action="toggle-edit-groups">${state.editingGroups ? '收起编辑' : '编辑关联群组'}</button></div>
+    ${state.editingGroups ? `<div class="comm-form"><div class="check-list">${(state.groups || []).map((g) => `<label><input type="checkbox" data-group-check="${esc(g.id)}" ${groups.some((x) => x.id === g.id) ? 'checked' : ''}> ${esc(g.name)}<span class="muted small">${g.visibility === 'private' ? '私密' : '公开'}</span></label>`).join('') || '<span class="muted small">暂无群组</span>'}</div>
+      <div class="form-row"><button class="btn primary" data-action="save-groups">保存关联</button>
+      <span class="comm-err" id="saveGroupsErr"></span></div></div>` : ''}` : ''}
+    </div>
+    <div class="comm-section"><h3>模块</h3>
+    <div class="chip-row">${modules.map((m) => `<span class="chip">${esc(m)}</span>`).join('') || '<span class="muted small">无</span>'}</div></div>`;
   box.querySelectorAll('[data-gid]').forEach((el) => {
     el.addEventListener('click', () => openConv('group', el.dataset.gid));
   });
+  const sel = $('teamSelect');
+  if (sel) sel.addEventListener('change', () => switchTeam(sel.value));
   if (window.ChimeraTranslate) window.ChimeraTranslate.observeTranslations(box);
 }
 
+// 社区页所有写操作走一个委托处理器：服务端原话展示，不自己编理由。
+$('communityBody').addEventListener('click', async (e) => {
+  const t = e.target.closest('[data-action]');
+  if (!t) return;
+  const action = t.dataset.action;
+  const c = state.community;
+  if (!c) return;
+  const setErr = (id, msg) => { const el = $(id); if (el) el.textContent = msg || ''; };
+  try {
+    if (action === 'toggle-create-team') { state.showCreateTeam = !state.showCreateTeam; renderCommunity(); return; }
+    if (action === 'toggle-edit-groups') { state.editingGroups = !state.editingGroups; renderCommunity(); return; }
+    if (action === 'cancel-reply') { state.replyingTo = null; renderTeamPosts(); return; }
+    if (action === 'join-code') {
+      const code = ($('joinCodeInput') || {}).value ? $('joinCodeInput').value.trim() : '';
+      if (!code) { setErr('commTopErr', '请先填邀请码'); return; }
+      t.disabled = true;
+      try {
+        const r = await window.chimera.api.joinCommunityByCode(code);
+        const list = await window.chimera.api.communities();
+        state.communities = list.communities || [];
+        state.community = null; state.teamLoaded = false; state.teamLedger = [];
+        state.teamPosts = []; state.teamPostsLoaded = false; state.replyingTo = null; state.editingGroups = false;
+        // join 回 publicCommunity：取详情切到刚加入的那个队。
+        const joined = (r && r.community) || null;
+        if (joined) {
+          const detail = await window.chimera.api.community(joined.id);
+          state.community = detail.community || detail;
+          renderCommunity(); loadTeamPosts();
+        } else await loadCommunity();
+      } catch (err) { setErr('commTopErr', err.message || err); } finally { t.disabled = false; }
+      return;
+    }
+    if (action === 'create-team') {
+      const name = ($('newTeamName') || {}).value ? $('newTeamName').value.trim() : '';
+      const title = ($('newTeamTitle') || {}).value ? $('newTeamTitle').value.trim() : '';
+      const description = ($('newTeamDesc') || {}).value ? $('newTeamDesc').value.trim() : '';
+      if (!name) { setErr('createTeamErr', '请填写团队名'); return; }
+      t.disabled = true;
+      try {
+        const r = await window.chimera.api.createCommunity({ name, title, description });
+        const list = await window.chimera.api.communities();
+        state.communities = list.communities || [];
+        state.showCreateTeam = false;
+        state.community = null; state.teamLoaded = false; state.teamLedger = [];
+        const created = (r && r.community) || null;
+        if (created) {
+          // create 只回 publicCommunity（无 members/groups），取详情再画。
+          const detail = await window.chimera.api.community(created.id);
+          state.community = detail.community || detail;
+          renderCommunity(); loadTeamPosts();
+        } else await loadCommunity();
+      } catch (err) { setErr('createTeamErr', err.message || err); } finally { t.disabled = false; }
+      return;
+    }
+    if (action === 'search-posts') { state.teamQuery = ($('teamSearch') || {}).value ? $('teamSearch').value.trim() : ''; loadTeamPosts(); return; }
+    if (action === 'refresh-posts') { loadTeamPosts(); return; }
+    if (action === 'new-post') {
+      const title = ($('newPostTitle') || {}).value ? $('newPostTitle').value.trim() : '';
+      const body = ($('newPostBody') || {}).value ? $('newPostBody').value.trim() : '';
+      if (!body) { setErr('newPostErr', '正文不能为空'); return; }
+      t.disabled = true;
+      try {
+        await window.chimera.api.createCommunityPost(c.id, { title, body });
+        $('newPostTitle').value = ''; $('newPostBody').value = '';
+        loadTeamPosts();
+      } catch (err) { setErr('newPostErr', err.message || err); } finally { t.disabled = false; }
+      return;
+    }
+    if (action === 'like-post') {
+      t.disabled = true;
+      try { await window.chimera.api.likePost(t.dataset.id); loadTeamPosts(); }
+      catch (err) { const el = document.querySelector(`[data-post-err="${t.dataset.id}"]`); if (el) el.textContent = err.message || err; }
+      finally { t.disabled = false; }
+      return;
+    }
+    if (action === 'reply-post') { state.replyingTo = state.replyingTo === t.dataset.id ? null : t.dataset.id; renderTeamPosts(); return; }
+    if (action === 'submit-reply') {
+      const ta = $('replyBody-' + t.dataset.id);
+      const body = ta ? ta.value.trim() : '';
+      if (!body) return;
+      t.disabled = true;
+      try {
+        await window.chimera.api.createPost({ board: null, title: '', body, replyTo: t.dataset.id });
+        state.replyingTo = null;
+        loadTeamPosts();
+      } catch (err) { const el = document.querySelector(`[data-post-err="${t.dataset.id}"]`); if (el) el.textContent = err.message || err; }
+      finally { t.disabled = false; }
+      return;
+    }
+    if (action === 'pin-post') {
+      const p = (state.teamPosts || []).find((x) => x.id === t.dataset.id);
+      const pinned = p ? !p.pinned : true;
+      t.disabled = true;
+      try { await window.chimera.api.pinPost(t.dataset.id, pinned); loadTeamPosts(); }
+      catch (err) { const el = document.querySelector(`[data-post-err="${t.dataset.id}"]`); if (el) el.textContent = err.message || err; }
+      finally { t.disabled = false; }
+      return;
+    }
+    if (action === 'delete-post') {
+      t.disabled = true;
+      try { await window.chimera.api.deletePost(t.dataset.id); loadTeamPosts(); }
+      catch (err) { const el = document.querySelector(`[data-post-err="${t.dataset.id}"]`); if (el) el.textContent = err.message || err; }
+      finally { t.disabled = false; }
+      return;
+    }
+    if (action === 'publish-ann') {
+      const body = ($('newAnnBody') || {}).value ? $('newAnnBody').value.trim() : '';
+      if (!body) { setErr('newAnnErr', '公告不能为空'); return; }
+      t.disabled = true;
+      try {
+        await window.chimera.api.createCommunityAnnouncement(c.id, body);
+        const detail = await window.chimera.api.community(c.id);
+        state.community = detail.community || detail;
+        renderCommunity(); loadTeamPosts();
+      } catch (err) { setErr('newAnnErr', err.message || err); } finally { t.disabled = false; }
+      return;
+    }
+    if (action === 'delete-ann') {
+      t.disabled = true;
+      try {
+        await window.chimera.api.deleteCommunityAnnouncement(c.id, t.dataset.id);
+        const detail = await window.chimera.api.community(c.id);
+        state.community = detail.community || detail;
+        renderCommunity(); loadTeamPosts();
+      } catch (err) { setErr('newAnnErr', err.message || err); } finally { t.disabled = false; }
+      return;
+    }
+    if (action === 'add-member') {
+      const name = ($('addMemberName') || {}).value ? $('addMemberName').value.trim() : '';
+      const type = ($('addMemberType') || {}).value || 'ai';
+      if (!name) { setErr('addMemberErr', '请填写账号名'); return; }
+      t.disabled = true;
+      try {
+        await window.chimera.api.addCommunityMember(c.id, { name, type });
+        $('addMemberName').value = '';
+        const detail = await window.chimera.api.community(c.id);
+        state.community = detail.community || detail;
+        renderCommunity(); loadTeamPosts();
+      } catch (err) { setErr('addMemberErr', err.message || err); } finally { t.disabled = false; }
+      return;
+    }
+    if (action === 'remove-member') {
+      t.disabled = true;
+      try {
+        await window.chimera.api.removeCommunityMember(c.id, t.dataset.name);
+        const detail = await window.chimera.api.community(c.id);
+        state.community = detail.community || detail;
+        renderCommunity(); loadTeamPosts();
+      } catch (err) { setErr('addMemberErr', err.message || err); } finally { t.disabled = false; }
+      return;
+    }
+    if (action === 'save-groups') {
+      const ids = [...document.querySelectorAll('[data-group-check]:checked')].map((x) => x.dataset.groupCheck);
+      t.disabled = true;
+      try {
+        const r = await window.chimera.api.setCommunityGroups(c.id, ids);
+        state.community = (r && r.community) || state.community;
+        state.editingGroups = false;
+        renderCommunity(); loadTeamPosts();
+      } catch (err) { setErr('saveGroupsErr', err.message || err); } finally { t.disabled = false; }
+      return;
+    }
+  } catch (err) {
+    const el = $('commTopErr');
+    if (el) el.textContent = err.message || err;
+  }
+});
+$('communityBody').addEventListener('change', async (e) => {
+  const t = e.target.closest('[data-action="set-role"]');
+  if (!t || !state.community) return;
+  try {
+    await window.chimera.api.setCommunityMemberRole(state.community.id, t.dataset.name, t.value);
+    const detail = await window.chimera.api.community(state.community.id);
+    state.community = detail.community || detail;
+    renderCommunity(); loadTeamPosts();
+  } catch (err) {
+    const el = $('addMemberErr');
+    if (el) el.textContent = err.message || err;
+    renderCommunity();
+  }
+});
+
 $('communityRefresh').addEventListener('click', () => {
   state.community = null;
+  state.teamPosts = []; state.teamPostsLoaded = false;
   loadCommunity();
 });
 
@@ -778,7 +1141,7 @@ function renderTeam() {
   const items = state.teamLedger || [];
   box.innerHTML = `
     <div class="comm-head"><h2>团队账本${c ? ' · ' + esc(c.title || c.name || '') : ''}</h2>
-    <p class="muted">只读：账本条目由论坛服务端记账，桌面端不写账本。最近 ${items.length} 条。</p></div>
+    <p class="muted">只读：账本条目由论坛服务端记账，桌面端不写账本。讨论、公告与成员管理在社区页。最近 ${items.length} 条。</p></div>
     ${items.map((it) => `<div class="ledger-item"><div class="ledger-kind">${esc(it.kind || '')}</div><div class="ledger-body">${esc(it.summary || it.body || '')}</div><div class="muted small">${esc(it.actor || it.by || '')} · ${esc(fmtTime(it.ts))}</div></div>`).join('') || '<div class="empty-note">暂无账本条目</div>'}`;
 }
 
@@ -941,6 +1304,26 @@ if (typeof window !== 'undefined' && window.ChimeraTranslate) {
   state.lang = window.ChimeraTranslate.viewerLang();
 }
 syncLangBtn();
+
+// ---------- 深浅主题（v0.3.4） ----------
+function syncThemeBtn() {
+  const b = $('themeToggle');
+  if (!b) return;
+  const t = window.ChimeraTheme ? window.ChimeraTheme.currentTheme() : 'dark';
+  b.textContent = t === 'light' ? '☀️ 浅色' : '🌙 深色';
+  b.title = t === 'light' ? '点按切换为深色主题' : '点按切换为浅色主题';
+}
+if (typeof window !== 'undefined' && window.ChimeraTheme) {
+  window.ChimeraTheme.applyTheme(document, window.ChimeraTheme.currentTheme());
+}
+syncThemeBtn();
+$('themeToggle').addEventListener('click', () => {
+  if (!window.ChimeraTheme) return;
+  const next = window.ChimeraTheme.currentTheme() === 'light' ? 'dark' : 'light';
+  window.ChimeraTheme.applyTheme(document, next);
+  window.ChimeraTheme.saveTheme(null, next);
+  syncThemeBtn();
+});
 
 $('langToggle').addEventListener('click', async () => {
   const next = state.lang === 'zh' ? 'en' : 'zh';

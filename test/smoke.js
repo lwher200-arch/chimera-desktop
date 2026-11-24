@@ -53,8 +53,13 @@ function startMockSeed() {
 // （按真实服务端口径验链：401/403/409/400 + ack）+ /api/heartbeat +
 // /api/stream（SSE：hello 后发 seq 101 再跳到 104，供 gap 测试）+
 // POST /api/groups/:id/join（v0.3.2 自加入群：公开群 200、私密群 403）+
-// POST /api/node/activate（v0.3.3 激活即分配：人类 Bearer 201、无 token 401）。
+// POST /api/node/activate（v0.3.3 激活即分配：人类 Bearer 201、无 token 401）+
+// 社区/团队可交互（v0.3.4）：/api/communities*、/api/posts/:id/like|pin、
+// DELETE /api/posts/:id、POST /api/posts（回帖继承 team_id）。
 // 只有 token 'test-node-token' 是节点身份；'test-ai-token' 是 AI 账号（403）。
+// Bearer 'test-token' = 人类 testhuman（mockteam 创建人）；
+// 'test-other-token' = 人类 otherhuman（初始非成员）；
+// 'test-stranger-token' = 人类 stranger（永不加入，用于 403 断言）。
 // state 暴露出来供测试断言与预置（setNodeState 模拟服务端超前）。
 function startMockForum() {
   const state = {
@@ -62,6 +67,17 @@ function startMockForum() {
     uploads: [], // 每次成功上传的 batch（headers 数组）
     heartbeats: 0,
     failNextUpload: 0, // >0 时下几次上传回 500（重试测试用）
+    // mock 团队：创建人 testhuman，成员 testai；otherhuman/stranger 初始非成员。
+    communities: [{
+      id: 'com-mock', name: 'mockteam', title: 'Mock 团队', description: 'mock 团队简介',
+      creator: 'testhuman', creator_type: 'human', createdTs: '2026-01-01T00:00:00.000Z',
+      members: [
+        { name: 'testhuman', type: 'human', role: 'creator', joinedTs: '2026-01-01T00:00:00.000Z' },
+        { name: 'testai', type: 'ai', role: 'member', joinedTs: '2026-01-01T00:00:00.000Z' },
+      ],
+      groups: [], announcements: [], inviteCode: 'MOCKCODE',
+    }],
+    teamPosts: [], // 团队讨论帖（team_id 指向 mock 团队；回帖也进这里）
   };
   const canonical = (o) => JSON.stringify(o, Object.keys(o).sort());
   const server = http.createServer((req, res) => {
@@ -151,6 +167,213 @@ function startMockForum() {
         state.uploads.push(headers);
         res.end(JSON.stringify({ ok: true, accepted: headers.length, lastSeq: state.node.lastSeq, lastHash: state.node.lastHash, node: 'node:testnode' }));
         return;
+      }
+      // ---- 社区 / 团队（v0.3.4 可交互，mock 口径与真实服务端一致） ----
+      const bearerMe = () => {
+        const a = req.headers.authorization;
+        if (a === 'Bearer test-token') return { name: 'testhuman', type: 'human' };
+        if (a === 'Bearer test-other-token') return { name: 'otherhuman', type: 'human' };
+        if (a === 'Bearer test-stranger-token') return { name: 'stranger', type: 'human' };
+        return null;
+      };
+      const commJson = () => { try { return JSON.parse(body || '{}'); } catch { return null; } };
+      const comm401 = () => { res.writeHead(401); res.end(JSON.stringify({ ok: false, error: 'login required' })); };
+      const commErr = (status, msg) => { res.writeHead(status); res.end(JSON.stringify({ ok: false, error: msg })); };
+      const pubComm = (c) => ({ id: c.id, name: c.name, title: c.title, description: c.description, memberCount: c.members.length, groupCount: c.groups.length, creator: c.creator, creator_type: c.creator_type, createdTs: c.createdTs });
+      const detailComm = (c) => ({
+        ...pubComm(c),
+        members: c.members.map((m) => ({ name: m.name, type: m.type, role: m.name === c.creator ? 'creator' : (m.role || 'member') })),
+        groups: c.groups.map((id) => ({ id, name: id === 'grp-public' ? 'mock-group' : 'mock-private', kind: 'chat', visibility: id === 'grp-private' ? 'private' : 'public' })),
+        announcements: c.announcements, modules_enabled: ['posts', 'ledger'],
+      });
+      const isMember = (c, me) => !!(me && c.members.some((m) => m.name === me.name && m.type === me.type));
+      const isCreator = (c, me) => !!(me && c.creator === me.name);
+      const isAdmin = (c, me) => isCreator(c, me) || !!(me && c.members.some((m) => m.name === me.name && m.role === 'admin'));
+      const findComm = (m) => (m ? state.communities.find((x) => x.id === decodeURIComponent(m[1])) : null);
+      const pubPost = (p) => ({ ...p, likesCount: p.likes.length, likedBy: p.likes.map((l) => l.name), replyCount: state.teamPosts.filter((x) => x.reply_to === p.id && !x.deleted).length });
+      // POST /api/communities（建队）
+      if (req.method === 'POST' && url.pathname === '/api/communities') {
+        const me = bearerMe(); if (!me) return comm401();
+        const data = commJson(); if (!data) return commErr(400, 'invalid JSON');
+        const name = String(data.name || '').trim();
+        if (!/^[a-z0-9][a-z0-9_-]{1,31}$/.test(name)) return commErr(400, 'team name must be 2..32 chars, lowercase letters/digits/-/ _');
+        if (state.communities.some((c) => c.name === name)) return commErr(409, 'team name already taken');
+        const c = { id: 'com-' + name, name, title: String(data.title || '').trim().slice(0, 32) || name, description: String(data.description || '').trim().slice(0, 500), creator: me.name, creator_type: me.type, createdTs: new Date().toISOString(), members: [{ name: me.name, type: me.type, role: 'creator', joinedTs: new Date().toISOString() }], groups: [], announcements: [], inviteCode: 'CODE-' + name.toUpperCase() };
+        state.communities.push(c);
+        res.writeHead(201); res.end(JSON.stringify({ ok: true, community: pubComm(c) })); return;
+      }
+      // POST /api/communities/join/:code（先于 :id 匹配）
+      const commJoinM = /^\/api\/communities\/join\/([^/]+)$/.exec(url.pathname);
+      if (req.method === 'POST' && commJoinM) {
+        const me = bearerMe(); if (!me) return comm401();
+        const c = state.communities.find((x) => x.inviteCode === decodeURIComponent(commJoinM[1]));
+        if (!c) return commErr(404, 'invalid invite code');
+        if (!isMember(c, me)) c.members.push({ name: me.name, type: me.type, role: 'member', joinedTs: new Date().toISOString() });
+        res.end(JSON.stringify({ ok: true, community: pubComm(c) })); return;
+      }
+      // GET /api/communities
+      if (req.method === 'GET' && url.pathname === '/api/communities') {
+        res.end(JSON.stringify({ ok: true, communities: state.communities.map(pubComm) })); return;
+      }
+      const commIdM = /^\/api\/communities\/([^/]+)$/.exec(url.pathname);
+      const commPostsM = /^\/api\/communities\/([^/]+)\/posts$/.exec(url.pathname);
+      const commAnnM = /^\/api\/communities\/([^/]+)\/announcements$/.exec(url.pathname);
+      const commAnnOneM = /^\/api\/communities\/([^/]+)\/announcements\/([^/]+)$/.exec(url.pathname);
+      const commMembersM = /^\/api\/communities\/([^/]+)\/members$/.exec(url.pathname);
+      const commMemberM = /^\/api\/communities\/([^/]+)\/members\/([^/]+)$/.exec(url.pathname);
+      const commRoleM = /^\/api\/communities\/([^/]+)\/members\/([^/]+)\/role$/.exec(url.pathname);
+      const commGroupsM = /^\/api\/communities\/([^/]+)\/groups$/.exec(url.pathname);
+      // GET /api/communities/:id
+      if (req.method === 'GET' && commIdM) {
+        const c = findComm(commIdM); if (!c) return commErr(404, 'team not found');
+        res.end(JSON.stringify({ ok: true, community: detailComm(c) })); return;
+      }
+      // GET/POST /api/communities/:id/posts
+      if (commPostsM) {
+        const c = findComm(commPostsM); if (!c) return commErr(404, 'team not found');
+        const me = bearerMe(); if (!me) return comm401();
+        if (!isMember(c, me)) return commErr(403, 'only team members can view team discussions');
+        if (req.method === 'GET') {
+          const q = (url.searchParams.get('q') || '').toLowerCase();
+          let posts = state.teamPosts.filter((p) => p.team_id === c.id && !p.deleted);
+          if (q) posts = posts.filter((p) => (p.title || '').toLowerCase().includes(q) || (p.body || '').toLowerCase().includes(q) || (p.author || '').toLowerCase().includes(q));
+          const items = posts.map(pubPost);
+          res.end(JSON.stringify({ ok: true, posts: items, total: items.length, has_more: false })); return;
+        }
+        if (req.method === 'POST') {
+          const data = commJson(); if (!data) return commErr(400, 'invalid JSON');
+          const bodyText = String(data.body || '');
+          if (!bodyText.trim() || bodyText.length > 10000) return commErr(400, 'body must be 1..10000 chars');
+          const p = { id: 'p-mock-' + (state.teamPosts.length + 1), author: me.name, author_type: me.type, topic: 'general', board: 'general', title: String(data.title || '').slice(0, 100), body: bodyText.trim(), team_id: c.id, reply_to: null, likes: [], pinned: false, ts: new Date().toISOString() };
+          state.teamPosts.push(p);
+          res.writeHead(201); res.end(JSON.stringify({ ok: true, post: pubPost(p) })); return;
+        }
+      }
+      // POST /api/communities/:id/announcements
+      if (commAnnM && req.method === 'POST') {
+        const c = findComm(commAnnM); if (!c) return commErr(404, 'team not found');
+        const me = bearerMe(); if (!me) return comm401();
+        if (!isCreator(c, me)) return commErr(403, 'only the team creator or the owner can post announcements');
+        const data = commJson(); if (!data) return commErr(400, 'invalid JSON');
+        const b = String(data.body || '');
+        if (!b || b.length > 2000) return commErr(400, 'announcement body must be 1..2000 chars');
+        const ann = { id: 'ann-mock-' + (c.announcements.length + 1), author: me.name, body: b, ts: new Date().toISOString() };
+        c.announcements.push(ann); if (c.announcements.length > 5) c.announcements.shift();
+        res.writeHead(201); res.end(JSON.stringify({ ok: true, announcement: ann, announcements: c.announcements })); return;
+      }
+      // DELETE /api/communities/:id/announcements/:annId
+      if (commAnnOneM && req.method === 'DELETE') {
+        const c = findComm(commAnnOneM); if (!c) return commErr(404, 'team not found');
+        const me = bearerMe(); if (!me) return comm401();
+        if (!isCreator(c, me)) return commErr(403, 'only the team creator or the owner can delete announcements');
+        const idx = c.announcements.findIndex((a) => a.id === decodeURIComponent(commAnnOneM[2]));
+        if (idx < 0) return commErr(404, 'announcement not found');
+        c.announcements.splice(idx, 1);
+        res.end(JSON.stringify({ ok: true, announcements: c.announcements })); return;
+      }
+      // POST /api/communities/:id/members（拉人）
+      if (commMembersM && req.method === 'POST') {
+        const c = findComm(commMembersM); if (!c) return commErr(404, 'team not found');
+        const me = bearerMe(); if (!me) return comm401();
+        if (!isAdmin(c, me)) return commErr(403, 'only the team creator, the owner, or a team admin can add members');
+        const data = commJson(); if (!data) return commErr(400, 'invalid JSON');
+        const name = String(data.name || '').trim(); const type = data.type;
+        if (!name || (type !== 'human' && type !== 'ai')) return commErr(400, 'name and type (human|ai) required');
+        if (!['testhuman', 'testai', 'otherhuman', 'stranger', 'newai'].includes(name)) return commErr(404, 'account not found');
+        if (c.members.some((m) => m.name === name)) return commErr(409, 'already a member');
+        c.members.push({ name, type, role: 'member', joinedTs: new Date().toISOString() });
+        res.end(JSON.stringify({ ok: true, members: c.members })); return;
+      }
+      // DELETE /api/communities/:id/members/:name（移出）
+      if (commMemberM && req.method === 'DELETE') {
+        const c = findComm(commMemberM); if (!c) return commErr(404, 'team not found');
+        const me = bearerMe(); if (!me) return comm401();
+        if (!isAdmin(c, me)) return commErr(403, 'only the team creator, the owner, or a team admin can remove members');
+        const name = decodeURIComponent(commMemberM[2]);
+        if (name === c.creator) return commErr(400, 'the team creator cannot be removed');
+        const idx = c.members.findIndex((m) => m.name === name);
+        if (idx < 0) return commErr(404, 'not a member');
+        c.members.splice(idx, 1);
+        res.end(JSON.stringify({ ok: true, members: c.members })); return;
+      }
+      // POST /api/communities/:id/members/:name/role（改角色）
+      if (commRoleM && req.method === 'POST') {
+        const c = findComm(commRoleM); if (!c) return commErr(404, 'team not found');
+        const me = bearerMe(); if (!me) return comm401();
+        if (!isCreator(c, me)) return commErr(403, 'only the team creator can change member roles');
+        const data = commJson(); if (!data) return commErr(400, 'invalid JSON');
+        const name = decodeURIComponent(commRoleM[2]);
+        if (name === c.creator) return commErr(400, 'the team creator role cannot be changed');
+        if (data.role !== 'admin' && data.role !== 'member') return commErr(400, 'role must be admin or member');
+        const m = c.members.find((x) => x.name === name);
+        if (!m) return commErr(404, 'not a member');
+        m.role = data.role;
+        res.end(JSON.stringify({ ok: true, members: c.members })); return;
+      }
+      // PATCH /api/communities/:id/groups（关联群组）
+      if (commGroupsM && req.method === 'PATCH') {
+        const c = findComm(commGroupsM); if (!c) return commErr(404, 'team not found');
+        const me = bearerMe(); if (!me) return comm401();
+        if (!isCreator(c, me)) return commErr(403, 'only the team creator or the owner can change linked groups');
+        const data = commJson(); if (!data) return commErr(400, 'invalid JSON');
+        if (!Array.isArray(data.groups)) return commErr(400, 'groups must be an array of group ids');
+        for (const gid of data.groups) if (!['grp-public', 'grp-private'].includes(gid)) return commErr(404, 'group not found: ' + String(gid));
+        c.groups = data.groups;
+        res.end(JSON.stringify({ ok: true, community: detailComm(c) })); return;
+      }
+      // POST /api/posts/:id/like（点赞/取消，toggle）
+      const likeM = /^\/api\/posts\/([^/]+)\/like$/.exec(url.pathname);
+      if (req.method === 'POST' && likeM) {
+        const me = bearerMe(); if (!me) return comm401();
+        const p = state.teamPosts.find((x) => x.id === decodeURIComponent(likeM[1]) && !x.deleted);
+        if (!p) return commErr(404, 'post not found');
+        const idx = p.likes.findIndex((l) => l.name === me.name);
+        if (idx >= 0) p.likes.splice(idx, 1); else p.likes.push({ name: me.name, type: me.type });
+        res.end(JSON.stringify({ ok: true, likesCount: p.likes.length, liked: idx < 0 })); return;
+      }
+      // POST /api/posts/:id/pin（置顶）
+      const pinM = /^\/api\/posts\/([^/]+)\/pin$/.exec(url.pathname);
+      if (req.method === 'POST' && pinM) {
+        const me = bearerMe(); if (!me) return comm401();
+        const p = state.teamPosts.find((x) => x.id === decodeURIComponent(pinM[1]) && !x.deleted);
+        if (!p) return commErr(404, 'post not found');
+        const data = commJson(); if (!data) return commErr(400, 'invalid JSON');
+        if (data.pinned !== true && data.pinned !== false) return commErr(400, 'pinned must be true or false');
+        if (p.reply_to) return commErr(400, 'only root posts can be pinned');
+        const c = state.communities.find((x) => x.id === p.team_id);
+        if (p.author !== me.name && !(c && isAdmin(c, me))) return commErr(403, 'only the author, the owner, or a group manager can pin this post');
+        p.pinned = data.pinned;
+        res.end(JSON.stringify({ ok: true, post: pubPost(p) })); return;
+      }
+      // DELETE /api/posts/:id（删帖，作者 only）
+      const delPostM = /^\/api\/posts\/([^/]+)$/.exec(url.pathname);
+      if (req.method === 'DELETE' && delPostM) {
+        const me = bearerMe(); if (!me) return comm401();
+        const p = state.teamPosts.find((x) => x.id === decodeURIComponent(delPostM[1]) && !x.deleted);
+        if (!p) return commErr(404, 'post not found');
+        if (p.author !== me.name) return commErr(403, 'only the author can delete this post');
+        p.deleted = true;
+        res.end(JSON.stringify({ ok: true })); return;
+      }
+      // POST /api/posts（回帖：reply_to 继承 team_id）
+      if (req.method === 'POST' && url.pathname === '/api/posts') {
+        const me = bearerMe(); if (!me) return comm401();
+        const data = commJson(); if (!data) return commErr(400, 'invalid JSON');
+        const bodyText = String(data.body || '');
+        if (!bodyText.trim() || bodyText.length > 10000) return commErr(400, 'body must be 1..10000 chars');
+        let teamId = null;
+        if (data.reply_to) {
+          const target = state.teamPosts.find((x) => x.id === String(data.reply_to) && !x.deleted);
+          if (!target) return commErr(400, 'reply target not found');
+          teamId = target.team_id || null;
+          if (teamId) {
+            const c = state.communities.find((x) => x.id === teamId);
+            if (!c || !isMember(c, me)) return commErr(403, 'only team members can reply to team posts');
+          }
+        }
+        const p = { id: 'p-mock-' + (state.teamPosts.length + 1), author: me.name, author_type: me.type, topic: 'general', board: 'general', title: '', body: bodyText.trim(), team_id: teamId, reply_to: data.reply_to || null, likes: [], pinned: false, ts: new Date().toISOString() };
+        state.teamPosts.push(p);
+        res.writeHead(201); res.end(JSON.stringify({ ok: true, post: pubPost(p) })); return;
       }
       res.end(JSON.stringify({ ok: true, posts: 472, accounts: 30, groups: 10, messages: 1676, dms: 7 }));
     });
@@ -438,6 +661,219 @@ async function main() {
       (e) => e.status === 401,
     );
     ok('节点激活：无 token 回 401');
+
+    // (h) 社区/团队可交互（v0.3.4）：建队、讨论、公告、成员、关联群组、帖子互动，全走 mock 论坛。
+    const TEAM = 'com-mock';
+    // 建队：重名 409；新队 201；无 token 401。
+    await assert.rejects(
+      withTimeout(mockClient.createCommunity('test-token', { name: 'mockteam' }), 15000, 'POST /api/communities 重名'),
+      (e) => e.status === 409,
+    );
+    ok('建队：重名回 409');
+    const created = await withTimeout(mockClient.createCommunity('test-token', { name: 'newteam', title: '新队', description: 'mock 新队' }), 15000, 'POST /api/communities');
+    assert.strictEqual(created.community.name, 'newteam', '建队应回新队名');
+    ok('建队：新队回 201');
+    await assert.rejects(
+      withTimeout(mockClient.createCommunity(null, { name: 'x' }), 15000, 'POST /api/communities 无 token'),
+      (e) => e.status === 401,
+    );
+    ok('建队：无 token 回 401');
+    // 凭邀请码加入：错码 404；正确码 200（otherhuman 加入 mockteam）。
+    await assert.rejects(
+      withTimeout(mockClient.joinCommunityByCode('test-other-token', 'WRONG'), 15000, 'POST /api/communities/join 错码'),
+      (e) => e.status === 404,
+    );
+    ok('邀请码加入：错码回 404');
+    const joinedTeam = await withTimeout(mockClient.joinCommunityByCode('test-other-token', 'MOCKCODE'), 15000, 'POST /api/communities/join');
+    assert.strictEqual(joinedTeam.community.id, TEAM, '加入应回 mockteam');
+    ok('邀请码加入：正确码回 200');
+    // 讨论列表：非成员 403；成员 200 且初始为空。
+    await assert.rejects(
+      withTimeout(mockClient.getCommunityPosts('test-stranger-token', TEAM), 15000, 'GET 讨论 非成员'),
+      (e) => e.status === 403,
+    );
+    ok('讨论列表：非成员回 403');
+    let teamPosts = await withTimeout(mockClient.getCommunityPosts('test-token', TEAM), 15000, 'GET /api/communities/:id/posts');
+    assert.strictEqual(teamPosts.total, 0, '初始讨论应为空');
+    ok('讨论列表：成员回 200，初始为空');
+    // 发帖：空正文 400；非成员 403；成员 201。
+    await assert.rejects(
+      withTimeout(mockClient.createCommunityPost('test-token', TEAM, { title: '', body: '   ' }), 15000, 'POST 讨论 空正文'),
+      (e) => e.status === 400,
+    );
+    ok('讨论发帖：空正文回 400');
+    await assert.rejects(
+      withTimeout(mockClient.createCommunityPost('test-stranger-token', TEAM, { title: '', body: 'hi' }), 15000, 'POST 讨论 非成员'),
+      (e) => e.status === 403,
+    );
+    ok('讨论发帖：非成员回 403');
+    const firstPost = await withTimeout(mockClient.createCommunityPost('test-token', TEAM, { title: '首帖', body: '大家好' }), 15000, 'POST /api/communities/:id/posts');
+    assert.strictEqual(firstPost.post.title, '首帖', '发帖应回标题');
+    assert.strictEqual(firstPost.post.team_id, TEAM, '团队帖应标 team_id');
+    const postId = firstPost.post.id;
+    ok('讨论发帖：成员回 201');
+    teamPosts = await withTimeout(mockClient.getCommunityPosts('test-token', TEAM), 15000, 'GET 讨论 发帖后');
+    assert.strictEqual(teamPosts.total, 1, '发帖后讨论应有 1 条');
+    assert.strictEqual(teamPosts.posts[0].replyCount, 0, '新帖回帖数应为 0');
+    ok('讨论列表：发帖后回 1 条');
+    // 搜索：按标题搜到，按作者搜不到不存在的。
+    teamPosts = await withTimeout(mockClient.getCommunityPosts('test-token', TEAM, { q: '首帖' }), 15000, 'GET 讨论 搜索');
+    assert.strictEqual(teamPosts.total, 1, '按标题搜应命中 1 条');
+    teamPosts = await withTimeout(mockClient.getCommunityPosts('test-token', TEAM, { q: '不存在' }), 15000, 'GET 讨论 搜索无命中');
+    assert.strictEqual(teamPosts.total, 0, '搜不到应回 0 条');
+    ok('讨论搜索：标题命中 1 条、无命中 0 条');
+    // 回帖：reply_to 继承 team_id；回帖数 +1；置顶回帖 400。
+    const reply = await withTimeout(mockClient.createPost('test-token', { board: null, title: '', body: '回一下', replyTo: postId }), 15000, 'POST /api/posts 回帖');
+    assert.strictEqual(reply.post.team_id, TEAM, '回帖应继承 team_id');
+    const replyId = reply.post.id;
+    ok('回帖：reply_to 继承 team_id');
+    teamPosts = await withTimeout(mockClient.getCommunityPosts('test-token', TEAM), 15000, 'GET 讨论 回帖后');
+    assert.strictEqual(teamPosts.posts.find((p) => p.id === postId).replyCount, 1, '回帖后回帖数应为 1');
+    ok('回帖：回帖数 +1');
+    await assert.rejects(
+      withTimeout(mockClient.pinPost('test-token', replyId, true), 15000, 'POST /api/posts/:id/pin 回帖'),
+      (e) => e.status === 400,
+    );
+    ok('置顶：回帖置顶回 400');
+    // 点赞：toggle（点一次 1、再点一次 0）；置顶：作者可置顶、非成员 403。
+    let liked = await withTimeout(mockClient.likePost('test-token', postId), 15000, 'POST /api/posts/:id/like');
+    assert.strictEqual(liked.likesCount, 1, '点赞后应为 1');
+    liked = await withTimeout(mockClient.likePost('test-token', postId), 15000, 'POST /api/posts/:id/like 取消');
+    assert.strictEqual(liked.likesCount, 0, '再点一次应取消为 0');
+    ok('点赞：toggle 1 → 0');
+    const pinned = await withTimeout(mockClient.pinPost('test-token', postId, true), 15000, 'POST /api/posts/:id/pin');
+    assert.strictEqual(pinned.post.pinned, true, '置顶后 pinned 应为 true');
+    ok('置顶：作者置顶回 200');
+    await assert.rejects(
+      withTimeout(mockClient.pinPost('test-stranger-token', postId, true), 15000, 'POST /api/posts/:id/pin 非成员'),
+      (e) => e.status === 403,
+    );
+    ok('置顶：非成员回 403');
+    // 删帖：非作者 403；作者 200，列表里消失。
+    await assert.rejects(
+      withTimeout(mockClient.deletePost('test-other-token', postId), 15000, 'DELETE /api/posts/:id 非作者'),
+      (e) => e.status === 403,
+    );
+    ok('删帖：非作者回 403');
+    await withTimeout(mockClient.deletePost('test-token', postId), 15000, 'DELETE /api/posts/:id');
+    teamPosts = await withTimeout(mockClient.getCommunityPosts('test-token', TEAM), 15000, 'GET 讨论 删帖后');
+    assert.strictEqual(teamPosts.posts.filter((p) => p.id === postId).length, 0, '删帖后主帖应不在列表');
+    assert.strictEqual(teamPosts.posts.filter((p) => p.id === replyId).length, 1, '删主帖不应连带删回帖');
+    ok('删帖：作者删帖回 200，主帖消失、回帖保留');
+    // 公告：非创建人 403；创建人 201；删公告：非创建人 403；创建人 200。
+    await assert.rejects(
+      withTimeout(mockClient.createCommunityAnnouncement('test-other-token', TEAM, 'hi'), 15000, 'POST 公告 非创建人'),
+      (e) => e.status === 403,
+    );
+    ok('公告发布：非创建人回 403');
+    const ann = await withTimeout(mockClient.createCommunityAnnouncement('test-token', TEAM, '公告一'), 15000, 'POST /api/communities/:id/announcements');
+    assert.strictEqual(ann.announcement.body, '公告一', '公告应回正文');
+    const annId = ann.announcement.id;
+    ok('公告发布：创建人回 201');
+    await assert.rejects(
+      withTimeout(mockClient.deleteCommunityAnnouncement('test-other-token', TEAM, annId), 15000, 'DELETE 公告 非创建人'),
+      (e) => e.status === 403,
+    );
+    ok('公告删除：非创建人回 403');
+    await withTimeout(mockClient.deleteCommunityAnnouncement('test-token', TEAM, annId), 15000, 'DELETE /api/communities/:id/announcements/:annId');
+    ok('公告删除：创建人回 200');
+    // 成员：拉人（创建人 200、重名 409、不存在 404、非 admin 403）；改角色（非创建人 403、创建人 200、改创建人 400）；
+    // 移出（删创建人 400、移出 200、再移 404）。
+    const added = await withTimeout(mockClient.addCommunityMember('test-token', TEAM, { name: 'newai', type: 'ai' }), 15000, 'POST /api/communities/:id/members');
+    assert.ok(added.members.some((m) => m.name === 'newai'), '拉人后成员里应有 newai');
+    ok('拉人：创建人回 200');
+    await assert.rejects(
+      withTimeout(mockClient.addCommunityMember('test-token', TEAM, { name: 'newai', type: 'ai' }), 15000, 'POST 拉人 重名'),
+      (e) => e.status === 409,
+    );
+    ok('拉人：重名回 409');
+    await assert.rejects(
+      withTimeout(mockClient.addCommunityMember('test-token', TEAM, { name: 'ghost', type: 'ai' }), 15000, 'POST 拉人 不存在'),
+      (e) => e.status === 404,
+    );
+    ok('拉人：不存在的账号回 404');
+    await assert.rejects(
+      withTimeout(mockClient.addCommunityMember('test-other-token', TEAM, { name: 'stranger', type: 'human' }), 15000, 'POST 拉人 非 admin'),
+      (e) => e.status === 403,
+    );
+    ok('拉人：非 admin 回 403');
+    await assert.rejects(
+      withTimeout(mockClient.setCommunityMemberRole('test-other-token', TEAM, 'testai', 'admin'), 15000, 'POST 改角色 非创建人'),
+      (e) => e.status === 403,
+    );
+    ok('改角色：非创建人回 403');
+    const roled = await withTimeout(mockClient.setCommunityMemberRole('test-token', TEAM, 'testai', 'admin'), 15000, 'POST /api/communities/:id/members/:name/role');
+    assert.strictEqual(roled.members.find((m) => m.name === 'testai').role, 'admin', '改角色后 testai 应为 admin');
+    ok('改角色：创建人回 200，testai 变管理员');
+    await assert.rejects(
+      withTimeout(mockClient.setCommunityMemberRole('test-token', TEAM, 'testhuman', 'admin'), 15000, 'POST 改角色 创建人'),
+      (e) => e.status === 400,
+    );
+    ok('改角色：改创建人回 400');
+    await assert.rejects(
+      withTimeout(mockClient.removeCommunityMember('test-token', TEAM, 'testhuman'), 15000, 'DELETE 移出 创建人'),
+      (e) => e.status === 400,
+    );
+    ok('移出：删创建人回 400');
+    const removed = await withTimeout(mockClient.removeCommunityMember('test-token', TEAM, 'testai'), 15000, 'DELETE /api/communities/:id/members/:name');
+    assert.ok(!removed.members.some((m) => m.name === 'testai'), '移出后成员里不应有 testai');
+    ok('移出：创建人回 200');
+    await assert.rejects(
+      withTimeout(mockClient.removeCommunityMember('test-token', TEAM, 'testai'), 15000, 'DELETE 移出 再移'),
+      (e) => e.status === 404,
+    );
+    ok('移出：再移不在的成员回 404');
+    // 关联群组：非创建人 403；不存在的群 404；正常 200。
+    await assert.rejects(
+      withTimeout(mockClient.setCommunityGroups('test-other-token', TEAM, ['grp-public']), 15000, 'PATCH 关联群组 非创建人'),
+      (e) => e.status === 403,
+    );
+    ok('关联群组：非创建人回 403');
+    await assert.rejects(
+      withTimeout(mockClient.setCommunityGroups('test-token', TEAM, ['grp-nope']), 15000, 'PATCH 关联群组 不存在的群'),
+      (e) => e.status === 404,
+    );
+    ok('关联群组：不存在的群回 404');
+    const linked = await withTimeout(mockClient.setCommunityGroups('test-token', TEAM, ['grp-public']), 15000, 'PATCH /api/communities/:id/groups');
+    assert.strictEqual(linked.community.groups.length, 1, '关联后应有 1 个群');
+    assert.strictEqual(linked.community.groups[0].id, 'grp-public', '关联的群 id 应为 grp-public');
+    ok('关联群组：创建人回 200，挂上 grp-public');
+
+    // (i) 主题（v0.3.4）：深浅变量表与 styles.css 一致；浅色底是亮的、深色底是暗的。
+    const { themeVars, applyTheme } = require('../renderer/theme');
+    const darkVars = themeVars('dark');
+    const lightVars = themeVars('light');
+    assert.notStrictEqual(darkVars['--bg0'], lightVars['--bg0'], '深浅底色应不同');
+    assert.strictEqual(lightVars['--bg0'], '#f3efe7', '浅色底应为暖纸色');
+    assert.strictEqual(darkVars['--text'], '#eef1fa', '深色文字应为亮色');
+    assert.strictEqual(lightVars['--text'], '#1d2333', '浅色文字应为深色');
+    // 与 styles.css 的变量表逐项对齐（防改一处漏一处）：只比 theme.js 里的键。
+    const css = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'styles.css'), 'utf8');
+    const cssBlock = (startMarker) => {
+      const i = css.indexOf(startMarker);
+      assert.ok(i >= 0, `styles.css 应含 ${startMarker}`);
+      const j = css.indexOf('}', i);
+      const block = css.slice(i, j);
+      const out = {};
+      for (const m of block.matchAll(/(--[a-z0-9-]+)\s*:\s*([^;]+);/g)) out[m[1]] = m[2].trim();
+      return out;
+    };
+    const cssDark = cssBlock(':root {');
+    const cssLight = cssBlock('[data-theme="light"] {');
+    for (const [k, v] of Object.entries(darkVars)) assert.strictEqual(cssDark[k], v, `styles.css :root 的 ${k} 应与 theme.js 一致`);
+    for (const [k, v] of Object.entries(lightVars)) assert.strictEqual(cssLight[k], v, `styles.css [data-theme="light"] 的 ${k} 应与 theme.js 一致`);
+    ok('主题：theme.js 与 styles.css 变量表逐项一致');
+    // applyTheme：写 data-theme + 变量（用最小假 document，不依赖 DOM）。
+    const styleStore = {};
+    const fakeEl = {
+      style: { setProperty(k, v) { styleStore[k] = v; } },
+      setAttribute(k, v) { this[k] = v; },
+    };
+    assert.strictEqual(applyTheme({ documentElement: fakeEl }, 'light'), 'light', 'applyTheme 应回 light');
+    assert.strictEqual(fakeEl['data-theme'], 'light', '应写 data-theme=light');
+    assert.strictEqual(styleStore['--bg0'], '#f3efe7', '应写浅色底变量');
+    assert.strictEqual(applyTheme({ documentElement: fakeEl }, 'bogus'), 'dark', '非法主题应回落深色');
+    ok('主题：applyTheme 写 data-theme 与变量，非法值回落深色');
   } finally {
     forum.close();
     fs.rmSync(tmp3b, { recursive: true, force: true });
@@ -1848,6 +2284,13 @@ async function main() {
       '未登录取账本应回 401',
     );
     ok('live GET /api/communities/:id/ledger：未登录回 401（成员 only）');
+    // 团队讨论未登录应 401（成员 only 的边界；v0.3.4 新增端点只读探针，不写线上状态）。
+    await assert.rejects(
+      client.getCommunityPosts(null, eterna.id),
+      (e) => e && e.status === 401,
+      '未登录取团队讨论应回 401',
+    );
+    ok('live GET /api/communities/:id/posts：未登录回 401（成员 only）');
     // 翻译 live：上游（MyMemory/Google）抖动时 429/502 只记注，不判败。
     try {
       const live = await withTimeout(client.translate(null, 'Hello, this is a test message for translation.', 'zh'), 20000, 'POST /api/translate');

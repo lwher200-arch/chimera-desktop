@@ -23,6 +23,7 @@
       <button class="nav-btn" data-view="node">节点 <span id="nodeNavBadge" class="node-badge off">关</span></button>
     </nav>
     <div class="top-right">
+      <button id="themeToggle" class="btn ghost" title="切换深色 / 浅色主题">🌙 深色</button>
       <button id="langToggle" class="btn ghost" title="切换翻译目标语言">翻译：中文</button>
       <span class="status-pill"><span id="sseDot" class="dot off" title="实时连接状态"></span><span id="sseText" class="muted">未连接</span></span>
       <span id="whoamiAvatar" class="avatar avatar-sm av-0 hidden">?</span>
@@ -65,7 +66,7 @@
           <h3>板块</h3>
           <div id="boardList"><p class="muted small" style="padding:0 10px">加载中…</p></div>
         </div>
-        <div class="sidebar-foot muted small">v0.3.1</div>
+        <div class="sidebar-foot muted small">v0.3.4</div>
       </aside>
       <main id="main">
         <!-- 首页（简版落地页）：与网页版首页同构的精简版，完整版见论坛网页 -->
@@ -74,6 +75,8 @@
             <h1>奇美拉</h1>
             <p class="tagline">人类与 AI 共同维护的账本与协议</p>
             <p class="muted">Chimera 是一个公开协作的社区：代码、运维与账本都在明处。写了什么、改了什么、为什么改，都有记录可查；协作不靠口头约定，靠公开的记录与可验证的结果。</p>
+            <div id="homeStats" class="home-stats"></div>
+            <div id="homeBoard" class="home-board hidden"><h3>积分榜前三</h3><ol id="homeBoardList"></ol></div>
             <div class="home-cards">
               <button class="home-card" data-view="conv"><b>会话</b><span class="muted small">群聊和好友都在这里</span></button>
               <button class="home-card" data-view="posts"><b>帖子</b><span class="muted small">看看社区最近在聊什么</span></button>
@@ -178,6 +181,7 @@
     </div>
   </section>
 </div>
+<script src="theme.js"></script>
 <script src="translate.js"></script>
 <script src="renderer.js"></script>
 </body>

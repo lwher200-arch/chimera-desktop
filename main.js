@@ -205,6 +205,7 @@ function registerIpc() {
   });
 
   ipcMain.handle('api:health', () => client.getHealth());
+  ipcMain.handle('api:leaderboard', (_e, limit) => client.getLeaderboard(limit || 20));
   ipcMain.handle('api:me', () => client.getMe(sessionToken()));
   ipcMain.handle('api:accounts', () => client.getAccounts());
   ipcMain.handle('api:groups', () => client.getGroups(sessionToken()));
@@ -232,6 +233,33 @@ function registerIpc() {
   ipcMain.handle('api:community', (_e, { id }) => client.getCommunity(sessionToken(), id));
   ipcMain.handle('api:community-ledger', (_e, { id, limit }) =>
     client.getCommunityLedger(sessionToken(), id, { limit }));
+  // 社区 / 团队（v0.3.4，可交互）：服务端按创建人/站长/admin/成员放行，失败原样抛错、渲染进程展示原话。
+  ipcMain.handle('api:create-community', (_e, { name, title, description }) =>
+    client.createCommunity(sessionToken(), { name, title, description }));
+  ipcMain.handle('api:join-community-code', (_e, { code }) =>
+    client.joinCommunityByCode(sessionToken(), code));
+  ipcMain.handle('api:community-posts', (_e, { id, limit, q }) =>
+    client.getCommunityPosts(sessionToken(), id, { limit, q }));
+  ipcMain.handle('api:create-community-post', (_e, { id, title, body }) =>
+    client.createCommunityPost(sessionToken(), id, { title, body }));
+  ipcMain.handle('api:create-community-announcement', (_e, { id, body }) =>
+    client.createCommunityAnnouncement(sessionToken(), id, body));
+  ipcMain.handle('api:delete-community-announcement', (_e, { id, annId }) =>
+    client.deleteCommunityAnnouncement(sessionToken(), id, annId));
+  ipcMain.handle('api:add-community-member', (_e, { id, name, type }) =>
+    client.addCommunityMember(sessionToken(), id, { name, type }));
+  ipcMain.handle('api:remove-community-member', (_e, { id, name }) =>
+    client.removeCommunityMember(sessionToken(), id, name));
+  ipcMain.handle('api:set-community-member-role', (_e, { id, name, role }) =>
+    client.setCommunityMemberRole(sessionToken(), id, name, role));
+  ipcMain.handle('api:set-community-groups', (_e, { id, groups }) =>
+    client.setCommunityGroups(sessionToken(), id, groups));
+  // 帖子互动（v0.3.4）：点赞 / 置顶 / 删帖 + 回复（createPost 已有，reply_to 继承 team_id）。
+  ipcMain.handle('api:create-post', (_e, { board, title, body, replyTo }) =>
+    client.createPost(sessionToken(), { board, title, body, replyTo }));
+  ipcMain.handle('api:like-post', (_e, { id }) => client.likePost(sessionToken(), id));
+  ipcMain.handle('api:pin-post', (_e, { id, pinned }) => client.pinPost(sessionToken(), id, pinned));
+  ipcMain.handle('api:delete-post', (_e, { id }) => client.deletePost(sessionToken(), id));
   // 加群（v0.3.2）：调 /join 自加（服务端按调用方身份加人）；服务端不放行时原样抛错，渲染进程展示原话。
   ipcMain.handle('api:join-group', (_e, { groupId }) =>
     client.joinGroup(sessionToken(), groupId));
