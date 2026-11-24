@@ -260,6 +260,12 @@ function registerIpc() {
   ipcMain.handle('api:like-post', (_e, { id }) => client.likePost(sessionToken(), id));
   ipcMain.handle('api:pin-post', (_e, { id, pinned }) => client.pinPost(sessionToken(), id, pinned));
   ipcMain.handle('api:delete-post', (_e, { id }) => client.deletePost(sessionToken(), id));
+  // v0.3.5：全站搜索 / 关注 / 关注动态 / 改自己资料。
+  ipcMain.handle('api:search', (_e, { q, limit }) => client.search(sessionToken(), q, limit || 20));
+  ipcMain.handle('api:follow', (_e, { name }) => client.getFollow(sessionToken(), name));
+  ipcMain.handle('api:toggle-follow', (_e, { name }) => client.toggleFollow(sessionToken(), name));
+  ipcMain.handle('api:following-feed', (_e, { limit, before_id }) => client.getFollowingFeed(sessionToken(), { limit, before_id }));
+  ipcMain.handle('api:update-me', (_e, { patch }) => client.updateMe(sessionToken(), patch));
   // 加群（v0.3.2）：调 /join 自加（服务端按调用方身份加人）；服务端不放行时原样抛错，渲染进程展示原话。
   ipcMain.handle('api:join-group', (_e, { groupId }) =>
     client.joinGroup(sessionToken(), groupId));

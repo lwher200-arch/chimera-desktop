@@ -18,11 +18,13 @@
       <button class="nav-btn active" data-view="home">首页</button>
       <button class="nav-btn" data-view="conv">会话</button>
       <button class="nav-btn" data-view="posts">帖子</button>
+      <button class="nav-btn" data-view="search">搜索</button>
       <button class="nav-btn" data-view="community">社区</button>
       <button class="nav-btn" data-view="team">团队</button>
       <button class="nav-btn" data-view="node">节点 <span id="nodeNavBadge" class="node-badge off">关</span></button>
     </nav>
     <div class="top-right">
+      <input id="globalSearchInput" type="text" placeholder="搜索帖子与消息…" title="回车搜索全站">
       <button id="themeToggle" class="btn ghost" title="切换深色 / 浅色主题">🌙 深色</button>
       <button id="langToggle" class="btn ghost" title="切换翻译目标语言">翻译：中文</button>
       <span class="status-pill"><span id="sseDot" class="dot off" title="实时连接状态"></span><span id="sseText" class="muted">未连接</span></span>
@@ -118,7 +120,20 @@
         <div id="pane-posts" class="pane hidden">
           <div class="posts-wrap">
             <div class="list-head"><b>最新帖子</b><span id="postsBoardLabel" class="muted small"></span><span class="spacer"></span><button id="postsRefresh" class="btn ghost">↻ 刷新</button></div>
+            <div class="feed-tabs"><button id="feedTabAll" class="feed-tab active">全部</button><button id="feedTabFollowing" class="feed-tab">关注动态</button></div>
+            <div class="comm-form" id="feedComposer">
+              <textarea id="feedPostBody" placeholder="写点什么…（最多 10000 字，发到当前板块）"></textarea>
+              <div class="form-row"><button class="btn primary" id="feedPostBtn">发帖</button><span class="comm-err" id="feedPostErr"></span></div>
+            </div>
             <div id="postsList" class="items"></div>
+          </div>
+        </div>
+
+        <!-- 全站搜索（v0.3.5） -->
+        <div id="pane-search" class="pane hidden">
+          <div class="posts-wrap">
+            <div class="list-head"><b>搜索</b><span id="searchLabel" class="muted small"></span><span class="spacer"></span><button id="searchRefresh" class="btn ghost">↻ 刷新</button></div>
+            <div id="searchResults" class="items"></div>
           </div>
         </div>
 
@@ -180,6 +195,12 @@
       </aside>
     </div>
   </section>
+
+  <!-- 资料卡（v0.3.5）：点人名/头像弹出，点背景或 ✕ 关闭 -->
+  <div id="profileModal" class="modal hidden">
+    <div class="modal-backdrop" data-action="close-profile"></div>
+    <div class="modal-card" id="profileBody"></div>
+  </div>
 </div>
 <script src="theme.js"></script>
 <script src="translate.js"></script>

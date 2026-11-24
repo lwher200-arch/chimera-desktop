@@ -78,6 +78,23 @@ function startMockForum() {
       groups: [], announcements: [], inviteCode: 'MOCKCODE',
     }],
     teamPosts: [], // 团队讨论帖（team_id 指向 mock 团队；回帖也进这里）
+    // 主帖子页（v0.3.5）：非团队帖；消息供 /api/search 用；账号资料供资料卡用。
+    feedPosts: [
+      { id: 'p-feed-1', author: 'otherhuman', author_type: 'human', topic: 'general', board: 'general', title: null, body: '欢迎来到奇美拉', team_id: null, group_id: null, reply_to: null, likes: [], pinned: false, ts: '2026-01-02T00:00:00.000Z' },
+      { id: 'p-feed-2', author: 'testhuman', author_type: 'human', topic: 'random', board: 'random', title: null, body: '随便聊聊', team_id: null, group_id: null, reply_to: null, likes: [], pinned: false, ts: '2026-01-03T00:00:00.000Z' },
+    ],
+    feedMessages: [
+      { id: 'm-feed-1', author: 'otherhuman', author_type: 'human', group_id: 'grp-public', body: '群里说一句欢迎', ts: '2026-01-02T01:00:00.000Z' },
+      { id: 'm-feed-2', author: 'stranger', author_type: 'human', group_id: 'grp-public', body: '路过打个招呼', ts: '2026-01-02T02:00:00.000Z' },
+    ],
+    accounts: [
+      { id: 'acc-testhuman', name: 'testhuman', type: 'human', role: 'member', bio: 'mock 人类', signature: '你好', tags: ['mock'], strengths: ['测试'], weaknesses: [], links: [], points: 10, level: 'L1', levelNum: 1, status: 'active', online: true, stats: { posts: 2, replies: 1, messages: 5, likesReceived: 3, shared: 0 } },
+      { id: 'acc-otherhuman', name: 'otherhuman', type: 'human', role: 'member', bio: '另一个 mock 人类', signature: '', tags: [], strengths: [], weaknesses: [], links: [], points: 5, level: 'L1', levelNum: 1, status: 'active', online: false, stats: { posts: 1, replies: 0, messages: 2, likesReceived: 1, shared: 0 } },
+      { id: 'acc-stranger', name: 'stranger', type: 'human', role: 'member', bio: '', signature: '', tags: [], strengths: [], weaknesses: [], links: [], points: 0, level: 'L1', levelNum: 1, status: 'active', online: false, stats: { posts: 0, replies: 0, messages: 1, likesReceived: 0, shared: 0 } },
+      { id: 'acc-testai', name: 'testai', type: 'ai', role: 'member', bio: 'mock AI', signature: '', tags: ['ai'], strengths: [], weaknesses: [], links: [], points: 20, level: 'L2', levelNum: 2, status: 'active', online: true, stats: { posts: 0, replies: 3, messages: 0, likesReceived: 0, shared: 0 }, model: 'mock-model', isBot: true, verified: null, owner: 'testhuman' },
+      { id: 'acc-newai', name: 'newai', type: 'ai', role: 'member', bio: '', signature: '', tags: [], strengths: [], weaknesses: [], links: [], points: 0, level: 'L1', levelNum: 1, status: 'active', online: false, stats: { posts: 0, replies: 0, messages: 0, likesReceived: 0, shared: 0 }, model: 'mock-model', isBot: false, verified: null, owner: 'testhuman' },
+    ],
+    follows: [], // {follower, follower_type, following, following_type, ts}
   };
   const canonical = (o) => JSON.stringify(o, Object.keys(o).sort());
   const server = http.createServer((req, res) => {
@@ -190,7 +207,9 @@ function startMockForum() {
       const isCreator = (c, me) => !!(me && c.creator === me.name);
       const isAdmin = (c, me) => isCreator(c, me) || !!(me && c.members.some((m) => m.name === me.name && m.role === 'admin'));
       const findComm = (m) => (m ? state.communities.find((x) => x.id === decodeURIComponent(m[1])) : null);
-      const pubPost = (p) => ({ ...p, likesCount: p.likes.length, likedBy: p.likes.map((l) => l.name), replyCount: state.teamPosts.filter((x) => x.reply_to === p.id && !x.deleted).length });
+      const pubPost = (p) => ({ ...p, likesCount: p.likes.length, likedBy: p.likes.map((l) => l.name), replyCount: [...state.teamPosts, ...state.feedPosts].filter((x) => x.reply_to === p.id && !x.deleted).length });
+      // v0.3.5：主帖子页与团队讨论共用一张帖子表（mock 里分两个数组），点赞/置顶/删帖两边都找。
+      const findAnyPost = (id) => [...state.teamPosts, ...state.feedPosts].find((x) => x.id === id && !x.deleted);
       // POST /api/communities（建队）
       if (req.method === 'POST' && url.pathname === '/api/communities') {
         const me = bearerMe(); if (!me) return comm401();
@@ -325,7 +344,7 @@ function startMockForum() {
       const likeM = /^\/api\/posts\/([^/]+)\/like$/.exec(url.pathname);
       if (req.method === 'POST' && likeM) {
         const me = bearerMe(); if (!me) return comm401();
-        const p = state.teamPosts.find((x) => x.id === decodeURIComponent(likeM[1]) && !x.deleted);
+        const p = findAnyPost(decodeURIComponent(likeM[1]));
         if (!p) return commErr(404, 'post not found');
         const idx = p.likes.findIndex((l) => l.name === me.name);
         if (idx >= 0) p.likes.splice(idx, 1); else p.likes.push({ name: me.name, type: me.type });
@@ -335,12 +354,12 @@ function startMockForum() {
       const pinM = /^\/api\/posts\/([^/]+)\/pin$/.exec(url.pathname);
       if (req.method === 'POST' && pinM) {
         const me = bearerMe(); if (!me) return comm401();
-        const p = state.teamPosts.find((x) => x.id === decodeURIComponent(pinM[1]) && !x.deleted);
+        const p = findAnyPost(decodeURIComponent(pinM[1]));
         if (!p) return commErr(404, 'post not found');
         const data = commJson(); if (!data) return commErr(400, 'invalid JSON');
         if (data.pinned !== true && data.pinned !== false) return commErr(400, 'pinned must be true or false');
         if (p.reply_to) return commErr(400, 'only root posts can be pinned');
-        const c = state.communities.find((x) => x.id === p.team_id);
+        const c = p.team_id ? state.communities.find((x) => x.id === p.team_id) : null;
         if (p.author !== me.name && !(c && isAdmin(c, me))) return commErr(403, 'only the author, the owner, or a group manager can pin this post');
         p.pinned = data.pinned;
         res.end(JSON.stringify({ ok: true, post: pubPost(p) })); return;
@@ -349,31 +368,113 @@ function startMockForum() {
       const delPostM = /^\/api\/posts\/([^/]+)$/.exec(url.pathname);
       if (req.method === 'DELETE' && delPostM) {
         const me = bearerMe(); if (!me) return comm401();
-        const p = state.teamPosts.find((x) => x.id === decodeURIComponent(delPostM[1]) && !x.deleted);
+        const p = findAnyPost(decodeURIComponent(delPostM[1]));
         if (!p) return commErr(404, 'post not found');
         if (p.author !== me.name) return commErr(403, 'only the author can delete this post');
         p.deleted = true;
         res.end(JSON.stringify({ ok: true })); return;
       }
-      // POST /api/posts（回帖：reply_to 继承 team_id）
+      // POST /api/posts（v0.3.5：回帖继承 team_id/board；无 reply_to 则是主帖子页发帖，
+      // board 校验、title 不存——与真实服务端同口径）。
       if (req.method === 'POST' && url.pathname === '/api/posts') {
         const me = bearerMe(); if (!me) return comm401();
         const data = commJson(); if (!data) return commErr(400, 'invalid JSON');
         const bodyText = String(data.body || '');
         if (!bodyText.trim() || bodyText.length > 10000) return commErr(400, 'body must be 1..10000 chars');
-        let teamId = null;
         if (data.reply_to) {
-          const target = state.teamPosts.find((x) => x.id === String(data.reply_to) && !x.deleted);
+          const target = findAnyPost(String(data.reply_to));
           if (!target) return commErr(400, 'reply target not found');
-          teamId = target.team_id || null;
+          const teamId = target.team_id || null;
           if (teamId) {
             const c = state.communities.find((x) => x.id === teamId);
             if (!c || !isMember(c, me)) return commErr(403, 'only team members can reply to team posts');
           }
+          const p = { id: 'p-mock-' + (state.teamPosts.length + state.feedPosts.length + 1), author: me.name, author_type: me.type, topic: target.board || 'general', board: target.board || 'general', title: null, body: bodyText.trim(), team_id: teamId, group_id: target.group_id || null, reply_to: String(data.reply_to), likes: [], pinned: false, ts: new Date().toISOString() };
+          (teamId ? state.teamPosts : state.feedPosts).push(p);
+          res.writeHead(201); res.end(JSON.stringify({ ok: true, post: pubPost(p) })); return;
         }
-        const p = { id: 'p-mock-' + (state.teamPosts.length + 1), author: me.name, author_type: me.type, topic: 'general', board: 'general', title: '', body: bodyText.trim(), team_id: teamId, reply_to: data.reply_to || null, likes: [], pinned: false, ts: new Date().toISOString() };
-        state.teamPosts.push(p);
+        const board = data.board ? String(data.board) : 'general';
+        if (!['general', 'random', 'tech'].includes(board)) return commErr(400, 'unknown board');
+        const p = { id: 'p-mock-' + (state.teamPosts.length + state.feedPosts.length + 1), author: me.name, author_type: me.type, topic: board, board, title: null, body: bodyText.trim(), team_id: null, group_id: null, reply_to: null, likes: [], pinned: false, ts: new Date().toISOString() };
+        state.feedPosts.push(p);
         res.writeHead(201); res.end(JSON.stringify({ ok: true, post: pubPost(p) })); return;
+      }
+      // GET /api/posts（v0.3.5 主帖子页）：须登录；q 搜标题/正文/作者；board 过滤；
+      // 置顶与流分离（pinned 在前，stream 按 limit 分页），与真实服务端同 shape。
+      if (req.method === 'GET' && url.pathname === '/api/posts') {
+        const me = bearerMe(); if (!me) return comm401();
+        const q = (url.searchParams.get('q') || '').trim().toLowerCase();
+        const board = url.searchParams.get('board') || '';
+        const limit = Math.max(1, parseInt(url.searchParams.get('limit') || '30', 10) || 30);
+        let posts = state.feedPosts.filter((p) => !p.deleted);
+        if (q) posts = posts.filter((p) => ((p.title || '') + ' ' + (p.body || '') + ' ' + (p.author || '')).toLowerCase().includes(q));
+        if (board) posts = posts.filter((p) => p.board === board);
+        const pinned = posts.filter((p) => p.pinned);
+        const stream = posts.filter((p) => !p.pinned);
+        const page = stream.slice(0, limit);
+        res.end(JSON.stringify({ ok: true, posts: page.map(pubPost), total: stream.length, has_more: stream.length > page.length, pinned_total: pinned.length, pinned: pinned.map(pubPost) })); return;
+      }
+      // GET /api/search（v0.3.5 全站搜索）：须登录；q 必填；帖子 + 群消息各按 limit 分页。
+      if (req.method === 'GET' && url.pathname === '/api/search') {
+        const me = bearerMe(); if (!me) return comm401();
+        const q = (url.searchParams.get('q') || '').trim();
+        if (!q) return commErr(400, 'q is required');
+        const needle = q.toLowerCase();
+        const limit = Math.max(1, parseInt(url.searchParams.get('limit') || '20', 10) || 20);
+        const posts = state.feedPosts.filter((p) => !p.deleted && ((p.title || '') + ' ' + (p.body || '') + ' ' + (p.author || '')).toLowerCase().includes(needle));
+        const messages = state.feedMessages.filter((m) => ((m.body || '') + ' ' + (m.author || '')).toLowerCase().includes(needle));
+        res.end(JSON.stringify({ ok: true, q, posts: posts.slice(0, limit).map(pubPost), totalPosts: posts.length, hasMorePosts: posts.length > limit, messages: messages.slice(0, limit), totalMessages: messages.length, hasMoreMessages: messages.length > limit })); return;
+      }
+      // GET /api/accounts（v0.3.5 资料卡）：公开全量。
+      if (req.method === 'GET' && url.pathname === '/api/accounts') {
+        res.end(JSON.stringify({ ok: true, accounts: state.accounts })); return;
+      }
+      // PATCH /api/accounts/me（v0.3.5 改自己资料）：须登录；只接受资料字段。
+      if (req.method === 'PATCH' && url.pathname === '/api/accounts/me') {
+        const me = bearerMe(); if (!me) return comm401();
+        const data = commJson(); if (!data) return commErr(400, 'invalid JSON');
+        const mine = state.accounts.find((a) => a.name === me.name);
+        if (!mine) return commErr(404, 'account not found');
+        if (data.owner !== undefined) return commErr(400, 'owner can only be set by the forum owner');
+        for (const k of ['bio', 'signature', 'avatarEmoji', 'avatarColor']) if (data[k] !== undefined) mine[k] = String(data[k]);
+        if (data.tags !== undefined) { if (!Array.isArray(data.tags)) return commErr(400, 'tags must be an array'); mine.tags = data.tags.map(String); }
+        res.end(JSON.stringify({ ok: true, account: mine })); return;
+      }
+      // GET/POST /api/follow/:name（v0.3.5 关注）：GET 公开 + followedByMe（登录时）；
+      // POST 切换，400 自己、404 不存在。
+      const followM = /^\/api\/follow\/([^/]+)$/.exec(url.pathname);
+      if (followM) {
+        const name = decodeURIComponent(followM[1]);
+        const target = state.accounts.find((a) => a.name === name);
+        if (!target) return commErr(404, 'account not found');
+        if (req.method === 'GET') {
+          const me = bearerMe();
+          const followers = state.follows.filter((f) => f.following === name).map((f) => ({ name: f.follower, type: f.follower_type }));
+          const following = state.follows.filter((f) => f.follower === name).map((f) => ({ name: f.following, type: f.following_type }));
+          const followedByMe = !!(me && state.follows.some((f) => f.follower === me.name && f.following === name));
+          res.end(JSON.stringify({ ok: true, name, followers, following, followersCount: followers.length, followingCount: following.length, followedByMe })); return;
+        }
+        if (req.method === 'POST') {
+          const me = bearerMe(); if (!me) return comm401();
+          if (name === me.name) return commErr(400, 'cannot follow yourself');
+          const idx = state.follows.findIndex((f) => f.follower === me.name && f.following === name);
+          let following;
+          if (idx >= 0) { state.follows.splice(idx, 1); following = false; }
+          else { state.follows.push({ follower: me.name, follower_type: me.type, following: name, following_type: target.type, ts: new Date().toISOString() }); following = true; }
+          const followersCount = state.follows.filter((f) => f.following === name).length;
+          const followingCount = state.follows.filter((f) => f.follower === me.name).length;
+          res.end(JSON.stringify({ ok: true, following, followersCount, followingCount })); return;
+        }
+      }
+      // GET /api/feed/following（v0.3.5 关注动态）：我关注的人（含我自己）的帖子，时间倒序。
+      if (req.method === 'GET' && url.pathname === '/api/feed/following') {
+        const me = bearerMe(); if (!me) return comm401();
+        const names = new Set(state.follows.filter((f) => f.follower === me.name).map((f) => f.following));
+        names.add(me.name);
+        const limit = Math.max(1, parseInt(url.searchParams.get('limit') || '30', 10) || 30);
+        const posts = state.feedPosts.filter((p) => !p.deleted && names.has(p.author));
+        const page = posts.slice(0, limit);
+        res.end(JSON.stringify({ ok: true, posts: page.map(pubPost), total: posts.length, has_more: posts.length > page.length, pinned_total: 0, pinned: [] })); return;
       }
       res.end(JSON.stringify({ ok: true, posts: 472, accounts: 30, groups: 10, messages: 1676, dms: 7 }));
     });
@@ -874,6 +975,140 @@ async function main() {
     assert.strictEqual(styleStore['--bg0'], '#f3efe7', '应写浅色底变量');
     assert.strictEqual(applyTheme({ documentElement: fakeEl }, 'bogus'), 'dark', '非法主题应回落深色');
     ok('主题：applyTheme 写 data-theme 与变量，非法值回落深色');
+
+    // (j) 帖子页互动 + 全站搜索 + 资料/关注（v0.3.5），全走 mock 论坛。
+    // 主帖子页发帖：201、board 落盘、title 不存（服务端只读 body/board/reply_to）。
+    const rootPost = await withTimeout(mockClient.createPost('test-token', { board: 'general', title: '应被丢掉的标题', body: '主帖子页第一帖' }), 15000, 'POST /api/posts 发主帖');
+    assert.strictEqual(rootPost.post.board, 'general', '发帖应落到 general 板');
+    assert.strictEqual(rootPost.post.title, null, '主帖子接口不存 title，应为 null');
+    assert.strictEqual(rootPost.post.team_id, null, '主帖不应带 team_id');
+    const rootId = rootPost.post.id;
+    ok('主帖子页发帖：回 201，board 落盘，title 不存');
+    await assert.rejects(
+      withTimeout(mockClient.createPost('test-token', { board: 'nope', title: '', body: 'x' }), 15000, 'POST /api/posts 未知板块'),
+      (e) => e.status === 400 && /unknown board/.test(e.message),
+    );
+    ok('主帖子页发帖：未知板块回 400');
+    // 列表：q 与 board 过滤；置顶与流分离。
+    let feed = await withTimeout(mockClient.getPosts('test-token', { limit: 30 }), 15000, 'GET /api/posts');
+    assert.ok(feed.posts.some((p) => p.id === rootId), '列表里应有刚发的主帖');
+    assert.ok(feed.posts.some((p) => p.id === 'p-feed-1'), '列表里应有种子帖');
+    ok('主帖子页列表：GET /api/posts 回种子帖 + 新帖');
+    feed = await withTimeout(mockClient.getPosts('test-token', { q: '第一帖' }), 15000, 'GET /api/posts?q=');
+    assert.strictEqual(feed.posts.length, 1, 'q 应只命中一帖');
+    assert.strictEqual(feed.posts[0].id, rootId, 'q 应命中刚发的主帖');
+    ok('主帖子页搜索：q 只命中匹配帖');
+    feed = await withTimeout(mockClient.getPosts('test-token', { q: '第一帖', limit: 30 }), 15000, 'GET /api/posts?q= 带 limit');
+    assert.strictEqual(feed.posts.length, 1, '带 limit 的 q 搜索应同样命中');
+    ok('主帖子页搜索：q + limit 组合正常');
+    // 回帖继承 board；点赞 toggle；置顶作者 200 / 非作者 403；删帖非作者 403 / 作者 200。
+    const feedReply = await withTimeout(mockClient.createPost('test-other-token', { board: null, title: '', body: '回主帖', replyTo: rootId }), 15000, 'POST /api/posts 回主帖');
+    assert.strictEqual(feedReply.post.board, 'general', '回帖应继承主帖 board');
+    assert.strictEqual(feedReply.post.reply_to, rootId, '回帖应带 reply_to');
+    ok('主帖子页回帖：board 继承，reply_to 落盘');
+    let feedLiked = await withTimeout(mockClient.likePost('test-other-token', rootId), 15000, 'POST /api/posts/:id/like 主帖');
+    assert.strictEqual(feedLiked.likesCount, 1, '点赞后应为 1');
+    feedLiked = await withTimeout(mockClient.likePost('test-other-token', rootId), 15000, 'POST /api/posts/:id/like 主帖取消');
+    assert.strictEqual(feedLiked.likesCount, 0, '取消后应为 0');
+    ok('主帖子页点赞：toggle 正常');
+    const feedPinned = await withTimeout(mockClient.pinPost('test-token', rootId, true), 15000, 'POST /api/posts/:id/pin 主帖');
+    assert.strictEqual(feedPinned.post.pinned, true, '置顶后 pinned 应为真');
+    feed = await withTimeout(mockClient.getPosts('test-token', { limit: 30 }), 15000, 'GET /api/posts 置顶后');
+    assert.ok((feed.pinned || []).some((p) => p.id === rootId), '置顶帖应在 pinned 区');
+    assert.ok(!feed.posts.some((p) => p.id === rootId), '置顶帖不应同时在流里');
+    ok('主帖子页置顶：作者回 200，pinned 与流分离');
+    await assert.rejects(
+      withTimeout(mockClient.pinPost('test-other-token', rootId, true), 15000, 'POST /api/posts/:id/pin 主帖非作者'),
+      (e) => e.status === 403,
+    );
+    ok('主帖子页置顶：非作者回 403');
+    await assert.rejects(
+      withTimeout(mockClient.deletePost('test-other-token', rootId), 15000, 'DELETE /api/posts/:id 主帖非作者'),
+      (e) => e.status === 403,
+    );
+    ok('主帖子页删帖：非作者回 403');
+    await withTimeout(mockClient.deletePost('test-token', rootId), 15000, 'DELETE /api/posts/:id 主帖作者');
+    feed = await withTimeout(mockClient.getPosts('test-token', { limit: 30 }), 15000, 'GET /api/posts 删帖后');
+    assert.strictEqual(feed.posts.filter((p) => p.id === rootId).length, 0, '删帖后主帖应不在列表');
+    ok('主帖子页删帖：作者回 200，主帖消失');
+    // 全站搜索：无 q 400；无 token 401；帖子命中与消息命中分开。
+    await assert.rejects(
+      withTimeout(mockClient.search('test-token', ''), 15000, 'GET /api/search 无 q'),
+      (e) => e.status === 400 && /q is required/.test(e.message),
+    );
+    ok('全站搜索：无 q 回 400');
+    await assert.rejects(
+      withTimeout(mockClient.search(null, '欢迎'), 15000, 'GET /api/search 无 token'),
+      (e) => e.status === 401,
+    );
+    ok('全站搜索：无 token 回 401');
+    const searchPosts = await withTimeout(mockClient.search('test-token', '欢迎来到'), 15000, 'GET /api/search 帖子命中');
+    assert.ok(searchPosts.posts.some((p) => p.id === 'p-feed-1'), '应命中种子帖');
+    assert.strictEqual(searchPosts.messages.length, 0, '帖子关键词不应命中消息');
+    assert.strictEqual(searchPosts.totalPosts, 1, 'totalPosts 应为 1');
+    ok('全站搜索：帖子命中，消息为空');
+    const searchMsgs = await withTimeout(mockClient.search('test-token', '群里说一句'), 15000, 'GET /api/search 消息命中');
+    assert.strictEqual(searchMsgs.posts.length, 0, '消息关键词不应命中帖子');
+    assert.ok(searchMsgs.messages.some((m) => m.id === 'm-feed-1'), '应命中群消息');
+    assert.strictEqual(searchMsgs.messages[0].group_id, 'grp-public', '消息应带 group_id 供跳转');
+    ok('全站搜索：消息命中，带 group_id');
+    // 关注：不存在 404；自己 400；切换 + 计数；关注动态只含关注者与自己。
+    await assert.rejects(
+      withTimeout(mockClient.getFollow('test-token', 'ghost'), 15000, 'GET /api/follow 不存在'),
+      (e) => e.status === 404,
+    );
+    ok('关注查询：不存在的账号回 404');
+    await assert.rejects(
+      withTimeout(mockClient.toggleFollow('test-token', 'testhuman'), 15000, 'POST /api/follow 自己'),
+      (e) => e.status === 400 && /cannot follow yourself/.test(e.message),
+    );
+    ok('关注切换：关注自己回 400');
+    let fol = await withTimeout(mockClient.toggleFollow('test-token', 'otherhuman'), 15000, 'POST /api/follow 关注');
+    assert.strictEqual(fol.following, true, '关注后 following 应为真');
+    assert.strictEqual(fol.followersCount, 1, '被关注者粉丝应为 1');
+    fol = await withTimeout(mockClient.getFollow('test-token', 'otherhuman'), 15000, 'GET /api/follow 关注后');
+    assert.strictEqual(fol.followedByMe, true, 'followedByMe 应为真');
+    assert.strictEqual(fol.followersCount, 1, '粉丝数应为 1');
+    ok('关注：切换 + 计数 + followedByMe 正常');
+    let followingFeed = await withTimeout(mockClient.getFollowingFeed('test-token', { limit: 30 }), 15000, 'GET /api/feed/following');
+    assert.ok(followingFeed.posts.some((p) => p.author === 'otherhuman'), '关注动态应含被关注者的帖');
+    assert.ok(followingFeed.posts.some((p) => p.author === 'testhuman'), '关注动态应含自己的帖');
+    assert.ok(!followingFeed.posts.some((p) => p.author === 'stranger'), '关注动态不应含陌生人的帖');
+    ok('关注动态：只含关注者与自己的帖');
+    fol = await withTimeout(mockClient.toggleFollow('test-token', 'otherhuman'), 15000, 'POST /api/follow 取关');
+    assert.strictEqual(fol.following, false, '取关后 following 应为假');
+    followingFeed = await withTimeout(mockClient.getFollowingFeed('test-token', { limit: 30 }), 15000, 'GET /api/feed/following 取关后');
+    assert.ok(!followingFeed.posts.some((p) => p.author === 'otherhuman'), '取关后动态不应再含对方的帖');
+    ok('关注：取关后动态不再含对方');
+    // 资料：全量含资料字段；改自己资料落盘；无 token 401。
+    const accounts = await withTimeout(mockClient.getAccounts(), 15000, 'GET /api/accounts');
+    const meAcc = (accounts.accounts || []).find((a) => a.name === 'testhuman');
+    assert.ok(meAcc && meAcc.bio === 'mock 人类', '资料应含 bio');
+    assert.ok(Array.isArray(meAcc.tags) && meAcc.tags.includes('mock'), '资料应含 tags');
+    assert.strictEqual(meAcc.stats.posts, 2, '资料应含 stats');
+    ok('资料：GET /api/accounts 含 bio/tags/stats');
+    const updated = await withTimeout(mockClient.updateMe('test-token', { bio: '改过的简介', signature: '新签名', tags: ['a', 'b'], avatarEmoji: '🌊' }), 15000, 'PATCH /api/accounts/me');
+    assert.strictEqual(updated.account.bio, '改过的简介', 'bio 应更新');
+    assert.strictEqual(updated.account.signature, '新签名', '签名应更新');
+    assert.deepStrictEqual(updated.account.tags, ['a', 'b'], 'tags 应更新');
+    assert.strictEqual(updated.account.avatarEmoji, '🌊', '头像表情应更新');
+    const accounts2 = await withTimeout(mockClient.getAccounts(), 15000, 'GET /api/accounts 改后');
+    assert.strictEqual((accounts2.accounts || []).find((a) => a.name === 'testhuman').bio, '改过的简介', '改后全量列表应反映新 bio');
+    ok('资料：PATCH /api/accounts/me 落盘，全量列表同步');
+    await assert.rejects(
+      withTimeout(mockClient.updateMe(null, { bio: 'x' }), 15000, 'PATCH /api/accounts/me 无 token'),
+      (e) => e.status === 401,
+    );
+    ok('资料：无 token 改资料回 401');
+    // live 只读探针：GET /api/accounts 公开 200；GET /api/search 未登录 401（与 M3 同口径）。
+    const liveAccounts = await withTimeout(client.getAccounts(), 15000, 'live GET /api/accounts');
+    assert.ok(Array.isArray(liveAccounts.accounts) && liveAccounts.accounts.length > 0, 'live 账号列表应非空');
+    ok(`live 账号列表公开可读，共 ${liveAccounts.accounts.length} 个账号`);
+    await assert.rejects(
+      withTimeout(client.search(null, 'test'), 15000, 'live GET /api/search 未登录'),
+      (e) => e.status === 401,
+    );
+    ok('live 全站搜索：未登录回 401');
   } finally {
     forum.close();
     fs.rmSync(tmp3b, { recursive: true, force: true });

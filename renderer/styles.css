@@ -471,6 +471,31 @@ select {
 #langToggle { white-space: nowrap; padding: 7px 10px; }
 /* 顶栏主题切换（v0.3.4） */
 #themeToggle { white-space: nowrap; padding: 7px 10px; }
+/* 顶栏全局搜索（v0.3.5） */
+#globalSearchInput { width: 190px; padding: 7px 10px; font-size: 13px; }
+/* 像正文一样的按钮：人名、关注者名字，点开资料卡 */
+.linklike { background: none; border: none; padding: 0; margin: 0; color: inherit; font: inherit; font-weight: 700; cursor: pointer; }
+.linklike:hover { text-decoration: underline; color: var(--gold); }
+/* 帖子页信息流切换（v0.3.5）：全部 / 关注动态 */
+.feed-tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+.feed-tab { background: var(--surface-2); border: 1px solid var(--border-strong); color: var(--muted); border-radius: 999px; padding: 4px 14px; font-size: 13px; cursor: pointer; }
+.feed-tab.active { background: var(--grad-gold); color: #231303; border-color: var(--gold); font-weight: 700; }
+/* 搜索结果分区标题与消息行（v0.3.5） */
+.search-sec { font-size: 14px; margin: 14px 0 8px; color: var(--muted); }
+.search-msg { background: var(--post-card-bg); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 10px 12px; margin-bottom: 8px; cursor: pointer; }
+.search-msg:hover { border-color: rgba(234, 181, 67, 0.45); }
+/* 资料卡弹窗（v0.3.5） */
+.modal { position: fixed; inset: 0; z-index: 50; display: flex; align-items: flex-start; justify-content: center; padding-top: 8vh; }
+.modal.hidden { display: none; }
+.modal-backdrop { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.55); }
+.modal-card { position: relative; width: min(520px, 92vw); max-height: 82vh; overflow-y: auto; background: var(--panel-bg); border: 1px solid var(--border-strong); border-radius: 16px; padding: 18px; box-shadow: var(--shadow-sm); }
+.profile-head { display: flex; gap: 12px; align-items: center; margin-bottom: 10px; }
+.profile-head h2 { margin: 0; font-size: 18px; }
+.profile-head .btn { margin-left: auto; }
+.profile-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+.profile-stats { margin: 8px 0; }
+.tag-chip { font-size: 12px; border-radius: 999px; padding: 1px 9px; background: var(--surface-2); border: 1px solid var(--border-strong); color: var(--muted); }
+.modal-card .comm-form label { display: flex; flex-direction: column; gap: 4px; }
 /* 窄屏顶栏（v0.3.1 走查）：1100px 以下藏品牌副标题、收紧导航间距；
    1000px 以下状态 pill 只留圆点，不让导航与右侧按钮叠在一起。 */
 @media (max-width: 1100px) {

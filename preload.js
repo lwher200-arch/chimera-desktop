@@ -44,6 +44,12 @@ contextBridge.exposeInMainWorld('chimera', {
     likePost: (id) => ipcRenderer.invoke('api:like-post', { id }),
     pinPost: (id, pinned) => ipcRenderer.invoke('api:pin-post', { id, pinned }),
     deletePost: (id) => ipcRenderer.invoke('api:delete-post', { id }),
+    // v0.3.5：全站搜索 / 关注 / 关注动态 / 改自己资料。
+    search: (q, limit) => ipcRenderer.invoke('api:search', { q, limit }),
+    getFollow: (name) => ipcRenderer.invoke('api:follow', { name }),
+    toggleFollow: (name) => ipcRenderer.invoke('api:toggle-follow', { name }),
+    followingFeed: (opts) => ipcRenderer.invoke('api:following-feed', opts || {}),
+    updateMe: (patch) => ipcRenderer.invoke('api:update-me', { patch }),
     joinGroup: (groupId) => ipcRenderer.invoke('api:join-group', { groupId }),
     read: (groupId, seq) => ipcRenderer.invoke('api:read', { groupId, seq }),
     upload: (filePath) => ipcRenderer.invoke('api:upload', { filePath }),

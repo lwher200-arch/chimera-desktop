@@ -52,9 +52,16 @@ const state = {
   teamPosts: [], // GET /api/communities/:id/posts 团队讨论
   teamPostsLoaded: false,
   teamQuery: '', // 讨论区搜索
-  replyingTo: null, // 正在回的那条团队帖 id
+  replyingTo: null, // 正在回的那条帖 id（团队讨论与主帖子页共用）
   editingGroups: false, // 是否在编辑关联群组
   showCreateTeam: false, // 是否展开新建团队表单
+  postsFeed: 'all', // 主帖子页信息流：all 全部 | following 关注动态
+  feedPosts: [], // 主帖子页当前列表（含置顶）
+  searchQuery: '', // 全站搜索当前关键词
+  searchResults: null, // 全站搜索结果 {posts, messages, totalPosts, totalMessages}
+  profileName: null, // 资料卡当前账号名
+  profileFollow: null, // 资料卡当前关注状态（GET /api/follow/:name 回包）
+  editingProfile: false, // 是否在编辑自己的资料
   lang: 'zh', // 翻译目标语言，默认中文（localStorage chimera_lang）
 };
 
@@ -139,6 +146,7 @@ async function boot() {
   if (sess) {
     state.me = { username: sess.username };
     $('whoami').textContent = sess.username;
+    $('whoami').dataset.profile = sess.username; // 点自己名字开自己的资料卡
     setMeChip();
     $('logoutBtn').classList.remove('hidden');
     show('main');
@@ -157,6 +165,7 @@ $('loginBtn').addEventListener('click', async () => {
     const r = await window.chimera.session.login(username, password);
     state.me = { username: r.username };
     $('whoami').textContent = r.username;
+    $('whoami').dataset.profile = r.username; // 点自己名字开自己的资料卡
     setMeChip();
     $('logoutBtn').classList.remove('hidden');
     show('main');
@@ -171,6 +180,7 @@ $('logoutBtn').addEventListener('click', async () => {
   await window.chimera.session.logout();
   state.me = null; state.open = null;
   $('whoami').textContent = '';
+  delete $('whoami').dataset.profile;
   setMeChip();
   $('logoutBtn').classList.add('hidden');
   show('login');
@@ -183,10 +193,12 @@ function showPane(v) {
   $('pane-home').classList.toggle('hidden', v !== 'home');
   $('pane-conv').classList.toggle('hidden', v !== 'conv');
   $('pane-posts').classList.toggle('hidden', v !== 'posts');
+  $('pane-search').classList.toggle('hidden', v !== 'search');
   $('pane-node').classList.toggle('hidden', v !== 'node');
   $('pane-community').classList.toggle('hidden', v !== 'community');
   $('pane-team').classList.toggle('hidden', v !== 'team');
   if (v === 'posts') loadPosts();
+  if (v === 'search') { if (state.searchResults) renderSearchResults(); }
   if (v === 'node') refreshNodePanel();
   if (v === 'community') loadCommunity();
   if (v === 'team') loadTeam();
@@ -312,7 +324,7 @@ function renderRightbar() {
   if (!box) return;
   const online = state.accounts.filter((a) => a.online);
   box.innerHTML = online.map((a) => `
-    <div class="online-item"><b>${esc(a.name)}</b>
+    <div class="online-item"><button class="linklike" data-profile="${esc(a.name)}">${esc(a.name)}</button>
     <span class="muted small"> ${a.type === 'human' ? '人类' : 'AI'}</span></div>`).join('')
     || '<div class="muted small">当前没有账号在线</div>';
 }
@@ -528,7 +540,7 @@ function messageHtml(m) {
   const trFn = (typeof window !== 'undefined' && window.ChimeraTranslate) ? window.ChimeraTranslate.placeholder : null;
   const tr = trFn ? trFn(m.body || '') : '';
   // data-id 供窗口裁剪与向前翻页（before_id）找最老一条用。
-  return `<div class="msg${mine ? ' mine' : ''}" data-id="${esc(m.id || '')}">${avatarHtml(author)}<div class="bubble"><div class="msg-head"><b>${esc(author)}</b><time>${esc(fmtTime(m.ts))}</time></div><div class="msg-body">${esc(m.body || '')}</div>${tr}${atts}</div></div>`;
+  return `<div class="msg${mine ? ' mine' : ''}" data-id="${esc(m.id || '')}">${avatarHtml(author)}<div class="bubble"><div class="msg-head"><button class="linklike" data-profile="${esc(author)}">${esc(author)}</button><time>${esc(fmtTime(m.ts))}</time></div><div class="msg-body">${esc(m.body || '')}</div>${tr}${atts}</div></div>`;
 }
 
 function renderMessages(msgs) {
@@ -700,29 +712,296 @@ $('chatInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendC
 
 // ---------- posts ----------
 $('postsRefresh').addEventListener('click', loadPosts);
-async function loadPosts() {
+// ---------- 主帖子页（v0.3.5 可交互）：点赞/回复/置顶/删除 + 发帖 + 关注动态 ----------
+// 信息流：all 全部（GET /api/posts）| following 关注动态（GET /api/feed/following）。
+// 板块过滤仍在客户端做（与 v0.3.1 同口径）；置顶与流分离下发，置顶放前面。
+function syncFeedTabs() {
+  const all = $('feedTabAll'); const fol = $('feedTabFollowing');
+  if (all) all.classList.toggle('active', state.postsFeed === 'all');
+  if (fol) fol.classList.toggle('active', state.postsFeed === 'following');
+}
+
+function renderFeedPosts() {
+  const box = $('postsList');
+  if (!box) return;
+  const posts = state.feedPosts || [];
   const label = $('postsBoardLabel');
   const boardName = state.postsBoard
     ? (state.boards.find((b) => b.id === state.postsBoard)?.name || state.postsBoard)
     : '';
   if (label) label.textContent = boardName ? `板块：${boardName}` : '';
+  if (!posts.length) {
+    box.innerHTML = `<div class="empty-note">${state.postsFeed === 'following' ? '关注的人还没有发帖' : (boardName ? '该板块暂无帖子' : '暂无帖子')}</div>`;
+    return;
+  }
+  const me = state.me;
+  const owner = isForumOwner(me);
+  box.innerHTML = posts.map((p) => {
+    const mine = me && p.author === me.username;
+    return postCardHtml(p, mine || owner);
+  }).join('');
+  if (window.ChimeraTranslate) window.ChimeraTranslate.observeTranslations(box);
+}
+
+async function loadPosts() {
+  const box = $('postsList');
+  if (!box) return;
+  syncFeedTabs();
   try {
-    const data = await window.chimera.api.posts({ limit: 30 });
-    const posts = filterPostsByBoard(data.posts || [], state.postsBoard);
-    $('postsList').innerHTML = posts.map((p) => {
-      const excerpt = (p.body || '').slice(0, 200);
-      return `
-      <div class="post-card"><b>${esc(p.title || '(无标题)')}</b>
-      <div class="post-meta">${avatarHtml(p.author || '?', 'avatar-sm')}<span>${esc(p.author || '')} · ${esc(fmtTime(p.ts))}</span></div>
-      <div class="post-excerpt">${esc(excerpt)}</div>${trPlaceholder(excerpt)}</div>`;
-    }).join('')
-      || `<div class="empty-note">${boardName ? '该板块暂无帖子' : '暂无帖子'}</div>`;
-    if (window.ChimeraTranslate) window.ChimeraTranslate.observeTranslations($('postsList'));
+    const data = state.postsFeed === 'following'
+      ? await window.chimera.api.followingFeed({ limit: 30 })
+      : await window.chimera.api.posts({ limit: 30 });
+    const all = [...(data.pinned || []), ...(data.posts || [])];
+    state.feedPosts = filterPostsByBoard(all, state.postsBoard);
+    renderFeedPosts();
   } catch (err) {
     // 帖子拉失败只影响帖子列表本身：板块栏是 loadBoards 常驻的，不动它。
-    $('postsList').innerHTML = `<div class="muted" style="padding:12px">加载失败：${esc(err.message || err)}</div>`;
+    box.innerHTML = `<div class="muted" style="padding:12px">加载失败：${esc(err.message || err)}</div>`;
   }
 }
+
+// 主帖子页写操作：发帖框 + 帖子卡片委托（与团队讨论共用 handlePostAction）。
+$('feedTabAll').addEventListener('click', () => { state.postsFeed = 'all'; loadPosts(); });
+$('feedTabFollowing').addEventListener('click', () => { state.postsFeed = 'following'; loadPosts(); });
+$('feedPostBtn').addEventListener('click', async (e) => {
+  const t = e.target;
+  const body = ($('feedPostBody') || {}).value ? $('feedPostBody').value.trim() : '';
+  const errEl = $('feedPostErr');
+  if (errEl) errEl.textContent = '';
+  if (!body) { if (errEl) errEl.textContent = '正文不能为空'; return; }
+  t.disabled = true;
+  try {
+    // 主帖子接口不存 title（服务端只读 body/board/reply_to），所以发帖框只有正文。
+    await window.chimera.api.createPost({ board: state.postsBoard || 'general', title: '', body });
+    $('feedPostBody').value = '';
+    loadPosts();
+  } catch (err) { if (errEl) errEl.textContent = err.message || err; }
+  finally { t.disabled = false; }
+});
+$('postsList').addEventListener('click', async (e) => {
+  const t = e.target.closest('[data-action]');
+  if (!t) return;
+  await handlePostAction(t.dataset.action, t, {
+    render: renderFeedPosts,
+    load: loadPosts,
+    findPost: (id) => (state.feedPosts || []).find((x) => x.id === id),
+  });
+});
+
+// ---------- 全站搜索（v0.3.5）：GET /api/search?q=，帖子 + 群消息 ----------
+// 帖子卡片与主帖子页共用 postCardHtml；消息行点开对应群聊/私信（作者名点开资料卡）。
+async function runSearch(q) {
+  const query = String(q || '').trim();
+  state.searchQuery = query;
+  const label = $('searchLabel');
+  if (label) label.textContent = query ? `搜索：${query}` : '';
+  const box = $('searchResults');
+  if (!box) return;
+  if (!query) { box.innerHTML = '<div class="empty-note">在顶栏输入关键词，回车搜索帖子与群消息</div>'; return; }
+  box.innerHTML = '<div class="muted small">搜索中…</div>';
+  try {
+    const data = await window.chimera.api.search(query, 20);
+    state.searchResults = data;
+    renderSearchResults();
+  } catch (err) {
+    state.searchResults = null;
+    box.innerHTML = `<div class="muted" style="padding:12px">搜索失败：${esc(err.message || err)}</div>`;
+  }
+}
+
+function renderSearchResults() {
+  const box = $('searchResults');
+  if (!box) return;
+  const r = state.searchResults;
+  if (!r) { box.innerHTML = '<div class="empty-note">在顶栏输入关键词，回车搜索帖子与群消息</div>'; return; }
+  const posts = r.posts || [];
+  const messages = r.messages || [];
+  const me = state.me;
+  const owner = isForumOwner(me);
+  const postHtml = posts.length
+    ? `<h3 class="search-sec">帖子（${r.totalPosts ?? posts.length}）</h3>` + posts.map((p) => {
+        const mine = me && p.author === me.username;
+        return postCardHtml(p, mine || owner);
+      }).join('')
+    : '<h3 class="search-sec">帖子（0）</h3><div class="empty-note">没有找到相关帖子</div>';
+  const msgHtml = messages.length
+    ? `<h3 class="search-sec">消息（${r.totalMessages ?? messages.length}）</h3>` + messages.map((m) => {
+        const g = m.group_id ? (state.groups || []).find((x) => x.id === m.group_id) : null;
+        const where = g ? esc(g.name) : '私信';
+        const openAttr = g
+          ? ` data-open-group="${esc(g.id)}"`
+          : (m.author && m.author !== (me && me.username) ? ` data-open-dm="${esc(m.author)}"` : '');
+        return `<div class="search-msg"${openAttr}>
+        <div class="post-meta">${avatarHtml(m.author || '?', 'avatar-sm')}<span><button class="linklike" data-profile="${esc(m.author || '')}">${esc(m.author || '')}</button> · ${esc(where)} · ${esc(fmtTime(m.ts))}</span></div>
+        <div class="post-excerpt">${esc((m.body || '').slice(0, 200))}</div>
+      </div>`;
+      }).join('')
+    : '<h3 class="search-sec">消息（0）</h3><div class="empty-note">没有找到相关消息</div>';
+  box.innerHTML = postHtml + msgHtml;
+  if (window.ChimeraTranslate) window.ChimeraTranslate.observeTranslations(box);
+}
+
+$('globalSearchInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { showPane('search'); runSearch(e.target.value); }
+});
+$('searchRefresh').addEventListener('click', () => runSearch(state.searchQuery));
+$('searchResults').addEventListener('click', async (e) => {
+  if (e.target.closest('[data-profile]')) return; // 作者名点开资料卡，不跳会话
+  const openGroup = e.target.closest('[data-open-group]');
+  if (openGroup) { openConv('group', openGroup.dataset.openGroup); return; }
+  const openDm = e.target.closest('[data-open-dm]');
+  if (openDm) { openConv('dm', openDm.dataset.openDm); return; }
+  const t = e.target.closest('[data-action]');
+  if (!t) return;
+  await handlePostAction(t.dataset.action, t, {
+    render: renderSearchResults,
+    load: () => runSearch(state.searchQuery),
+    findPost: (id) => ((state.searchResults && state.searchResults.posts) || []).find((x) => x.id === id),
+  });
+});
+
+// ---------- 用户资料 + 关注（v0.3.5） ----------
+// 资料来源：GET /api/accounts 全量（loadAll 已拉，state.accounts 常驻；
+// 打开资料卡时若找不到该名再重拉一次）；关注状态：GET /api/follow/:name。
+function accountByName(name) {
+  return (state.accounts || []).find((a) => a.name === name) || null;
+}
+
+async function openProfile(name) {
+  if (!name) return;
+  state.profileName = name;
+  state.editingProfile = false;
+  const modal = $('profileModal');
+  const box = $('profileBody');
+  if (!box || !modal) return;
+  box.innerHTML = '<div class="muted small">加载中…</div>';
+  modal.classList.remove('hidden');
+  let acc = accountByName(name);
+  if (!acc) {
+    try {
+      const list = await window.chimera.api.accounts();
+      state.accounts = list.accounts || [];
+      acc = accountByName(name);
+    } catch { /* 列表拉不到就用空资料 */ }
+  }
+  let follow = null;
+  try { follow = await window.chimera.api.getFollow(name); } catch { follow = null; }
+  state.profileFollow = follow;
+  renderProfile(acc, follow);
+}
+
+function renderProfile(acc, follow) {
+  const box = $('profileBody');
+  if (!box) return;
+  const name = state.profileName;
+  const me = state.me;
+  const isSelf = !!(me && me.username === name);
+  if (!acc) {
+    box.innerHTML = `<div class="profile-head"><h2>${esc(name)}</h2><button class="btn ghost" data-action="close-profile">✕</button></div><p class="muted small">找不到该账号（可能已退役或列表未同步）</p>`;
+    return;
+  }
+  const st = acc.stats || {};
+  const chips = (arr) => (arr || []).map((x) => `<span class="tag-chip">${esc(String(x))}</span>`).join('');
+  const links = (acc.links || []).map((l) => `<a href="${esc(String(l))}" target="_blank" rel="noreferrer">${esc(String(l))}</a>`).join(' ');
+  const followers = (follow && follow.followers) || [];
+  const following = (follow && follow.following) || [];
+  const followedByMe = !!(follow && follow.followedByMe);
+  const followersCount = follow ? follow.followersCount : followers.length;
+  const followingCount = follow ? follow.followingCount : following.length;
+  const nameChips = (list) => list.map((f) => `<button class="linklike" data-profile="${esc(f.name)}">${esc(f.name)}</button>`).join('、') || '<span class="muted small">无</span>';
+  const avEmoji = acc.avatarEmoji || avatarInitial(acc.name);
+  const avStyle = acc.avatarColor ? ` style="background:${esc(acc.avatarColor)}"` : '';
+  const avClass = acc.avatarColor ? '' : ' ' + avatarClass(acc.name);
+  box.innerHTML = `
+    <div class="profile-head">
+      <span class="avatar avatar-lg${avClass}"${avStyle}>${esc(avEmoji)}</span>
+      <div><h2>${esc(acc.name)}</h2>
+      <div class="muted small">${acc.type === 'human' ? '人类' : acc.type === 'ai' ? 'AI' : '节点'} · ${esc(acc.role || 'member')} · ${esc(acc.level || '')} · ${acc.points ?? 0} 分${acc.status && acc.status !== 'active' ? ' · 已' + esc(acc.status) : ''}</div></div>
+      <button class="btn ghost" data-action="close-profile">✕</button>
+    </div>
+    ${acc.bio ? `<p>${esc(acc.bio)}</p>` : ''}
+    ${acc.signature ? `<p class="muted small">“${esc(acc.signature)}”</p>` : ''}
+    ${acc.tags && acc.tags.length ? `<div class="profile-row">${chips(acc.tags)}</div>` : ''}
+    ${acc.strengths && acc.strengths.length ? `<div class="profile-row"><b class="small">擅长：</b>${chips(acc.strengths)}</div>` : ''}
+    ${acc.weaknesses && acc.weaknesses.length ? `<div class="profile-row"><b class="small">短板：</b>${chips(acc.weaknesses)}</div>` : ''}
+    ${links ? `<div class="profile-row small">${links}</div>` : ''}
+    <div class="profile-stats muted small">帖子 ${st.posts ?? 0} · 回复 ${st.replies ?? 0} · 消息 ${st.messages ?? 0} · 获赞 ${st.likesReceived ?? 0}</div>
+    <div class="profile-row small"><b>关注 ${followingCount}</b> ${nameChips(following)}</div>
+    <div class="profile-row small"><b>粉丝 ${followersCount}</b> ${nameChips(followers)}</div>
+    <div class="form-row">
+      ${isSelf
+        ? `<button class="btn" data-action="toggle-edit-profile">${state.editingProfile ? '收起编辑' : '编辑资料'}</button>`
+        : `<button class="btn primary" data-action="toggle-follow">${followedByMe ? '已关注' : '关注'}</button>
+           <button class="btn" data-action="dm-profile">发私信</button>`}
+    </div>
+    ${isSelf && state.editingProfile ? `
+      <div class="comm-form">
+        <label class="small muted">简介 <input type="text" id="profileBio" value="${esc(acc.bio || '')}" maxlength="500"></label>
+        <label class="small muted">签名 <input type="text" id="profileSignature" value="${esc(acc.signature || '')}" maxlength="200"></label>
+        <label class="small muted">标签（逗号分隔） <input type="text" id="profileTags" value="${esc((acc.tags || []).join('，'))}"></label>
+        <label class="small muted">头像表情 <input type="text" id="profileAvatarEmoji" value="${esc(acc.avatarEmoji || '')}" maxlength="8"></label>
+        <div class="form-row"><button class="btn primary" data-action="save-profile">保存</button><span class="comm-err" id="profileEditErr"></span></div>
+      </div>` : ''}
+    <span class="comm-err" id="profileErr"></span>`;
+}
+
+// 资料卡内所有操作走一个委托处理器；点人名（data-profile）冒泡到全局处理器开新资料卡。
+$('profileModal').addEventListener('click', async (e) => {
+  const t = e.target.closest('[data-action]');
+  if (!t) return;
+  const action = t.dataset.action;
+  const name = state.profileName;
+  if (!name) return;
+  const setErr = (id, msg) => { const el = $(id); if (el) el.textContent = msg || ''; };
+  if (action === 'close-profile') { $('profileModal').classList.add('hidden'); state.profileName = null; return; }
+  if (action === 'toggle-follow') {
+    t.disabled = true;
+    try {
+      await window.chimera.api.toggleFollow(name);
+      const follow = await window.chimera.api.getFollow(name).catch(() => null);
+      state.profileFollow = follow;
+      renderProfile(accountByName(name), follow);
+    } catch (err) { setErr('profileErr', err.message || err); }
+    finally { t.disabled = false; }
+    return;
+  }
+  if (action === 'dm-profile') {
+    $('profileModal').classList.add('hidden');
+    state.profileName = null;
+    openConv('dm', name);
+    return;
+  }
+  if (action === 'toggle-edit-profile') { state.editingProfile = !state.editingProfile; renderProfile(accountByName(name), state.profileFollow); return; }
+  if (action === 'save-profile') {
+    const patch = {
+      bio: ($('profileBio') || {}).value ? $('profileBio').value.trim() : '',
+      signature: ($('profileSignature') || {}).value ? $('profileSignature').value.trim() : '',
+      tags: ($('profileTags') || {}).value ? $('profileTags').value.split(/[,，]/).map((s) => s.trim()).filter(Boolean) : [],
+      avatarEmoji: ($('profileAvatarEmoji') || {}).value ? $('profileAvatarEmoji').value.trim() : '',
+    };
+    t.disabled = true;
+    try {
+      await window.chimera.api.updateMe(patch);
+      const list = await window.chimera.api.accounts().catch(() => null);
+      if (list) state.accounts = list.accounts || [];
+      state.editingProfile = false;
+      const follow = await window.chimera.api.getFollow(name).catch(() => null);
+      state.profileFollow = follow;
+      renderProfile(accountByName(name), follow);
+    } catch (err) { setErr('profileEditErr', err.message || err); }
+    finally { t.disabled = false; }
+    return;
+  }
+});
+
+// 全局：点人名/头像（data-profile）开资料卡。注意：资料卡内关注者/被关注者
+// 名字也是 data-profile，点后直接切到那人的资料卡（openProfile 重渲染）。
+document.addEventListener('click', (e) => {
+  const el = e.target.closest('[data-profile]');
+  if (!el) return;
+  e.preventDefault();
+  openProfile(el.dataset.profile);
+});
 
 // ---------- 社区 / 团队（v0.3.1 只读 v1；v0.3.4 可交互） ----------
 // 角色口径与服务端一致：创建人 creator、团队内 admin、普通 member、非成员 null；
@@ -791,12 +1070,84 @@ async function loadTeamPosts() {
     const data = await window.chimera.api.communityPosts(id, { limit: 50, q: state.teamQuery || null });
     // 切队竞态：回包时当前队已变就丢弃，不盖新队的列表。
     if (!state.community || state.community.id !== id) return;
-    state.teamPosts = data.posts || [];
+    // 置顶与流分离下发（服务端 splitPinned）：置顶放前面，流放后面，两者不重叠。
+    state.teamPosts = [...(data.pinned || []), ...(data.posts || [])];
     state.teamPostsLoaded = true;
     renderTeamPosts();
   } catch (err) {
     state.teamPosts = []; state.teamPostsLoaded = false;
     if (box) box.innerHTML = `<div class="muted small">讨论加载失败：${esc(err.message || err)}</div>`;
+  }
+}
+
+// ---------- 帖子卡片（v0.3.5 共享）：团队讨论、主帖子页、搜索结果、关注动态共用 ----
+// canPin 由调用方按权限口径给（团队：本人或团队管理；主帖子页/搜索：本人或站长；
+// 服务端才是最终裁决，403 时原话显示）。作者名可点开资料卡（data-profile）。
+function postCardHtml(p, canPin) {
+  const me = state.me;
+  const mine = me && p.author === me.username;
+  const liked = me && (p.likedBy || []).includes(me.username);
+  return `<div class="post-card" data-post="${esc(p.id)}">
+      <b>${p.pinned ? '📌 ' : ''}${esc(p.title || '')}</b>
+      <div class="post-meta">${avatarHtml(p.author || '?', 'avatar-sm')}<span><button class="linklike" data-profile="${esc(p.author || '')}">${esc(p.author || '')}</button> · ${esc(fmtTime(p.ts))}</span>${p.reply_to ? `<span>回复 @${esc(p.reply_to_author || '')}</span>` : ''}</div>
+      <div class="post-excerpt">${esc(p.body || '')}</div>${trPlaceholder(p.body || '')}
+      <div class="post-actions">
+        <button class="btn ghost" data-action="like-post" data-id="${esc(p.id)}">${liked ? '❤️ 已赞' : '🤍 点赞'} ${p.likesCount || 0}</button>
+        <button class="btn ghost" data-action="reply-post" data-id="${esc(p.id)}">💬 回复 ${p.replyCount || 0}</button>
+        ${canPin ? `<button class="btn ghost" data-action="pin-post" data-id="${esc(p.id)}">${p.pinned ? '取消置顶' : '置顶'}</button>` : ''}
+        ${mine ? `<button class="btn ghost" data-action="delete-post" data-id="${esc(p.id)}">删除</button>` : ''}
+        <span class="comm-err" data-post-err="${esc(p.id)}"></span>
+      </div>
+      ${state.replyingTo === p.id ? `<div class="comm-form" style="margin-top:8px">
+        <textarea id="replyBody-${esc(p.id)}" placeholder="回复 @${esc(p.author || '')}…"></textarea>
+        <div class="form-row"><button class="btn primary" data-action="submit-reply" data-id="${esc(p.id)}">发送回复</button>
+        <button class="btn ghost" data-action="cancel-reply">取消</button></div>
+      </div>` : ''}
+    </div>`;
+}
+
+// 帖子写操作共享处理器（v0.3.5）：点赞/回复/提交回复/取消回复/置顶/删帖。
+// ctx = { render, load, findPost }：render 只重画本列表（保住输入框），
+// load 从服务端重拉（写完刷新）；服务端原话展示，不自己编理由。
+async function handlePostAction(action, t, ctx) {
+  const setPostErr = (id, msg) => { const el = document.querySelector(`[data-post-err="${id}"]`); if (el) el.textContent = msg || ''; };
+  if (action === 'cancel-reply') { state.replyingTo = null; ctx.render(); return; }
+  if (action === 'reply-post') { state.replyingTo = state.replyingTo === t.dataset.id ? null : t.dataset.id; ctx.render(); return; }
+  if (action === 'like-post') {
+    t.disabled = true;
+    try { await window.chimera.api.likePost(t.dataset.id); await ctx.load(); }
+    catch (err) { setPostErr(t.dataset.id, err.message || err); }
+    finally { t.disabled = false; }
+    return;
+  }
+  if (action === 'submit-reply') {
+    const ta = $('replyBody-' + t.dataset.id);
+    const body = ta ? ta.value.trim() : '';
+    if (!body) return;
+    t.disabled = true;
+    try {
+      await window.chimera.api.createPost({ board: null, title: '', body, replyTo: t.dataset.id });
+      state.replyingTo = null;
+      await ctx.load();
+    } catch (err) { setPostErr(t.dataset.id, err.message || err); }
+    finally { t.disabled = false; }
+    return;
+  }
+  if (action === 'pin-post') {
+    const p = ctx.findPost ? ctx.findPost(t.dataset.id) : null;
+    const pinned = p ? !p.pinned : true;
+    t.disabled = true;
+    try { await window.chimera.api.pinPost(t.dataset.id, pinned); await ctx.load(); }
+    catch (err) { setPostErr(t.dataset.id, err.message || err); }
+    finally { t.disabled = false; }
+    return;
+  }
+  if (action === 'delete-post') {
+    t.disabled = true;
+    try { await window.chimera.api.deletePost(t.dataset.id); await ctx.load(); }
+    catch (err) { setPostErr(t.dataset.id, err.message || err); }
+    finally { t.disabled = false; }
+    return;
   }
 }
 
@@ -813,25 +1164,7 @@ function renderTeamPosts() {
   const admin = canAdminTeam(c, me);
   box.innerHTML = posts.map((p) => {
     const mine = me && p.author === me.username;
-    const liked = me && (p.likedBy || []).includes(me.username);
-    const canPin = mine || admin;
-    return `<div class="post-card" data-post="${esc(p.id)}">
-      <b>${p.pinned ? '📌 ' : ''}${esc(p.title || '')}</b>
-      <div class="post-meta">${avatarHtml(p.author || '?', 'avatar-sm')}<span>${esc(p.author || '')} · ${esc(fmtTime(p.ts))}</span>${p.reply_to ? `<span>回复 @${esc(p.reply_to_author || '')}</span>` : ''}</div>
-      <div class="post-excerpt">${esc(p.body || '')}</div>${trPlaceholder(p.body || '')}
-      <div class="post-actions">
-        <button class="btn ghost" data-action="like-post" data-id="${esc(p.id)}">${liked ? '❤️ 已赞' : '🤍 点赞'} ${p.likesCount || 0}</button>
-        <button class="btn ghost" data-action="reply-post" data-id="${esc(p.id)}">💬 回复 ${p.replyCount || 0}</button>
-        ${canPin ? `<button class="btn ghost" data-action="pin-post" data-id="${esc(p.id)}">${p.pinned ? '取消置顶' : '置顶'}</button>` : ''}
-        ${mine ? `<button class="btn ghost" data-action="delete-post" data-id="${esc(p.id)}">删除</button>` : ''}
-        <span class="comm-err" data-post-err="${esc(p.id)}"></span>
-      </div>
-      ${state.replyingTo === p.id ? `<div class="comm-form" style="margin-top:8px">
-        <textarea id="replyBody-${esc(p.id)}" placeholder="回复 @${esc(p.author || '')}…"></textarea>
-        <div class="form-row"><button class="btn primary" data-action="submit-reply" data-id="${esc(p.id)}">发送回复</button>
-        <button class="btn ghost" data-action="cancel-reply">取消</button></div>
-      </div>` : ''}
-    </div>`;
+    return postCardHtml(p, mine || admin);
   }).join('');
   if (window.ChimeraTranslate) window.ChimeraTranslate.observeTranslations(box);
 }
@@ -936,7 +1269,15 @@ $('communityBody').addEventListener('click', async (e) => {
   try {
     if (action === 'toggle-create-team') { state.showCreateTeam = !state.showCreateTeam; renderCommunity(); return; }
     if (action === 'toggle-edit-groups') { state.editingGroups = !state.editingGroups; renderCommunity(); return; }
-    if (action === 'cancel-reply') { state.replyingTo = null; renderTeamPosts(); return; }
+    // 帖子写操作（点赞/回复/置顶/删帖）走共享处理器，刷新只重拉讨论列表。
+    if (['like-post', 'reply-post', 'submit-reply', 'cancel-reply', 'pin-post', 'delete-post'].includes(action)) {
+      await handlePostAction(action, t, {
+        render: renderTeamPosts,
+        load: loadTeamPosts,
+        findPost: (id) => (state.teamPosts || []).find((x) => x.id === id),
+      });
+      return;
+    }
     if (action === 'join-code') {
       const code = ($('joinCodeInput') || {}).value ? $('joinCodeInput').value.trim() : '';
       if (!code) { setErr('commTopErr', '请先填邀请码'); return; }
@@ -991,43 +1332,6 @@ $('communityBody').addEventListener('click', async (e) => {
         $('newPostTitle').value = ''; $('newPostBody').value = '';
         loadTeamPosts();
       } catch (err) { setErr('newPostErr', err.message || err); } finally { t.disabled = false; }
-      return;
-    }
-    if (action === 'like-post') {
-      t.disabled = true;
-      try { await window.chimera.api.likePost(t.dataset.id); loadTeamPosts(); }
-      catch (err) { const el = document.querySelector(`[data-post-err="${t.dataset.id}"]`); if (el) el.textContent = err.message || err; }
-      finally { t.disabled = false; }
-      return;
-    }
-    if (action === 'reply-post') { state.replyingTo = state.replyingTo === t.dataset.id ? null : t.dataset.id; renderTeamPosts(); return; }
-    if (action === 'submit-reply') {
-      const ta = $('replyBody-' + t.dataset.id);
-      const body = ta ? ta.value.trim() : '';
-      if (!body) return;
-      t.disabled = true;
-      try {
-        await window.chimera.api.createPost({ board: null, title: '', body, replyTo: t.dataset.id });
-        state.replyingTo = null;
-        loadTeamPosts();
-      } catch (err) { const el = document.querySelector(`[data-post-err="${t.dataset.id}"]`); if (el) el.textContent = err.message || err; }
-      finally { t.disabled = false; }
-      return;
-    }
-    if (action === 'pin-post') {
-      const p = (state.teamPosts || []).find((x) => x.id === t.dataset.id);
-      const pinned = p ? !p.pinned : true;
-      t.disabled = true;
-      try { await window.chimera.api.pinPost(t.dataset.id, pinned); loadTeamPosts(); }
-      catch (err) { const el = document.querySelector(`[data-post-err="${t.dataset.id}"]`); if (el) el.textContent = err.message || err; }
-      finally { t.disabled = false; }
-      return;
-    }
-    if (action === 'delete-post') {
-      t.disabled = true;
-      try { await window.chimera.api.deletePost(t.dataset.id); loadTeamPosts(); }
-      catch (err) { const el = document.querySelector(`[data-post-err="${t.dataset.id}"]`); if (el) el.textContent = err.message || err; }
-      finally { t.disabled = false; }
       return;
     }
     if (action === 'publish-ann') {
