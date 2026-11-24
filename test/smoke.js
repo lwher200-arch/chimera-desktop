@@ -2889,6 +2889,199 @@ async function main() {
     ok('renderer.js ui/uiFmt：无模块回 key、有模块透传');
   }
 
+  console.log('== 13. 顶栏溢出修复 + 全内容跟随语言（v0.3.8）==');
+  // 13a. 顶栏 CSS：1400px 断点收紧、导航可横向滚动兜底、1000px 规则保留。
+  {
+    const css = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'styles.css'), 'utf8');
+    const m1400 = css.match(/@media \(max-width: 1400px\) \{([\s\S]*?)\n\}/);
+    assert.ok(m1400, '应有 1400px 断点');
+    assert.ok(m1400[1].includes('.brand .sub { display: none; }'), '1400px 以下应藏品牌副标题');
+    assert.ok(m1400[1].includes('#globalSearchInput { width: 140px; }'), '1400px 以下搜索框应收窄到 140px');
+    assert.ok(m1400[1].includes('.nav-btn { padding: 7px 8px; }'), '1400px 以下导航按钮应收紧内边距');
+    assert.ok(/\.topnav-links \{[^}]*overflow-x: auto/.test(css), '导航容器应可横向滚动兜底');
+    assert.ok(css.includes('.topnav-links::-webkit-scrollbar { display: none; }'), '导航滚动条应隐藏');
+    assert.ok(css.includes('@media (max-width: 1000px)'), '1000px 断点应保留');
+    assert.ok(css.includes('#sseText { display: none; }'), '1000px 以下状态文字仍应隐藏');
+    ok('顶栏 CSS：1400px 断点收紧 + 导航横向滚动兜底 + 1000px 规则保留');
+  }
+  // 13b–13e 共用：假 localStorage（Node 下没有），用完删掉。
+  globalThis.localStorage = {
+    _s: {},
+    getItem(k) { return this._s[k] === undefined ? null : this._s[k]; },
+    setItem(k, v) { this._s[k] = String(v); },
+  };
+  const sleep13 = (ms) => new Promise((r) => setTimeout(r, ms));
+  const makeBodyEl = (text, cls) => ({
+    _text: text,
+    classList: { contains: (c) => c === cls },
+    dataset: {},
+    get textContent() { return this._text; },
+    set textContent(v) { this._text = v; },
+  });
+  const makeBox13 = (id, bodyEl) => ({
+    _html: '', _attrs: { 'data-trid': id },
+    previousElementSibling: bodyEl || null,
+    dataset: {},
+    set innerHTML(v) { this._html = v; },
+    get innerHTML() { return this._html; },
+    getAttribute(k) { return this._attrs[k] || null; },
+    removeAttribute(k) { delete this._attrs[k]; },
+    querySelector() { return null; },
+  });
+  // 13b. 正文换显：英文模式下中文正文整段换成译文，框只剩“显示原文”口子；点两次来回切换。
+  {
+    tr._resetForTest();
+    tr.setViewerLang('en');
+    assert.strictEqual(tr.viewerLang(), 'en', '假 localStorage 下应切到英文');
+    let calls = 0;
+    tr.setBatchFn(async (items) => { calls++; return items.map((it) => ({ translated: 'EN:' + it.text })); });
+    const orig = '你好世界这是一个中文帖子正文';
+    const html = tr.placeholder(orig);
+    assert.ok(html.includes('data-trid="at'), '中文正文对英文用户应出翻译框');
+    const id = html.match(/data-trid="(at\d+)"/)[1];
+    const bodyEl = makeBodyEl(orig, 'msg-body');
+    const box = makeBox13(id, bodyEl);
+    tr.observeTranslations({ querySelectorAll: () => [box] });
+    tr.flushNow();
+    await sleep13(100);
+    assert.strictEqual(calls, 1, '应调一次批量接口');
+    assert.strictEqual(bodyEl.textContent, 'EN:' + orig, '正文应整段换成译文');
+    assert.strictEqual(box.dataset.trSwap, '1', '换显的框应打 trSwap 标记');
+    assert.ok(box._html.includes('Show original'), '换显的框应留“显示原文”按钮');
+    assert.ok(!box._html.includes('class="tr-text"'), '换显的框不应再有译文 span');
+    const btn = {
+      _text: 'Show original', dataset: {},
+      get textContent() { return this._text; },
+      set textContent(v) { this._text = v; },
+      getAttribute(k) {
+        if (k === 'data-tr-retry') return null;
+        if (k === 'data-tr-orig') return encodeURIComponent(orig);
+        if (k === 'data-tr-text') return encodeURIComponent('EN:' + orig);
+        return null;
+      },
+      closest(sel) { return sel === '.tr-toggle' ? btn : (sel === '.trbox' ? box : null); },
+    };
+    tr._handleClick({ target: btn });
+    assert.strictEqual(bodyEl.textContent, orig, '点“显示原文”正文应回原文');
+    assert.strictEqual(btn.textContent, 'Show translation', '按钮应变“显示翻译”');
+    tr._handleClick({ target: btn });
+    assert.strictEqual(bodyEl.textContent, 'EN:' + orig, '再点正文应回译文');
+    assert.strictEqual(btn.textContent, 'Show original', '按钮应变回“显示原文”');
+    ok('正文换显：英文模式中文正文整段换译文，框只剩切换口子，点两次来回');
+  }
+  // 13c. 带代码的正文不整换：旧框下翻译，正文原样保留（含代码块）。
+  {
+    tr._resetForTest();
+    tr.setViewerLang('en');
+    tr.setBatchFn(async (items) => items.map((it) => ({ translated: 'EN:' + it.text })));
+    const orig = '```js\nconst a = 1;\n``` 你好世界';
+    const html = tr.placeholder(orig);
+    assert.ok(html.includes('data-trid="at'), '带代码的中文散文也应出翻译框');
+    const id = html.match(/data-trid="(at\d+)"/)[1];
+    const bodyEl = makeBodyEl(orig, 'post-excerpt');
+    const box = makeBox13(id, bodyEl);
+    tr.observeTranslations({ querySelectorAll: () => [box] });
+    tr.flushNow();
+    await sleep13(100);
+    assert.strictEqual(bodyEl.textContent, orig, '带代码的正文不应被整段换掉');
+    assert.ok(box._html.includes('class="tr-text"'), '带代码的正文应走旧框下翻译');
+    assert.ok(box._html.includes('EN:你好世界'), '旧框应渲染出译文');
+    ok('带代码正文不整换：旧框下翻译，正文含代码原样保留');
+  }
+  // 13d. 缓存命中即时恢复：同一文本第二对正文+框，不再调接口，当场换显。
+  {
+    tr._resetForTest();
+    tr.setViewerLang('en');
+    let calls = 0;
+    tr.setBatchFn(async (items) => { calls++; return items.map((it) => ({ translated: 'EN:' + it.text })); });
+    const orig = '缓存测试正文内容';
+    const id1 = tr.placeholder(orig).match(/data-trid="(at\d+)"/)[1];
+    const body1 = makeBodyEl(orig, 'msg-body');
+    const box1 = makeBox13(id1, body1);
+    tr.observeTranslations({ querySelectorAll: () => [box1] });
+    tr.flushNow();
+    await sleep13(100);
+    assert.strictEqual(calls, 1, '第一次应调接口');
+    assert.strictEqual(body1.textContent, 'EN:' + orig, '第一次应换显');
+    const id2 = tr.placeholder(orig).match(/data-trid="(at\d+)"/)[1];
+    const body2 = makeBodyEl(orig, 'msg-body');
+    const box2 = makeBox13(id2, body2);
+    tr.observeTranslations({ querySelectorAll: () => [box2] });
+    tr.flushNow();
+    assert.strictEqual(calls, 1, '缓存命中不应再调接口');
+    assert.strictEqual(body2.textContent, 'EN:' + orig, '缓存命中应立即换显');
+    ok('缓存命中即时恢复：第二对正文不调接口，当场换显');
+  }
+  // 13e. 名字翻译：群名/版块名走同一批量队列；切回中文恢复原文；再切英文缓存命中不调接口；same 原样保留。
+  {
+    tr._resetForTest();
+    tr.setViewerLang('en');
+    let calls = 0;
+    tr.setBatchFn(async (items) => { calls++; return items.map((it) => ({ translated: 'EN:' + it.text })); });
+    const makeNameEl = (name) => ({
+      _text: name, _attrs: { 'data-tr-name': name }, dataset: {},
+      get textContent() { return this._text; },
+      set textContent(v) { this._text = v; },
+      getAttribute(k) { return this._attrs[k] || null; },
+    });
+    const g1 = makeNameEl('茶馆');
+    const g2 = makeNameEl('技术探讨与安全防御');
+    const doc = { querySelectorAll: (sel) => (sel === '[data-tr-name]' ? [g1, g2] : []) };
+    tr.observeNameTranslations(doc);
+    tr.flushNow();
+    await sleep13(100);
+    assert.strictEqual(calls, 1, '名字应一批调接口');
+    assert.strictEqual(g1.textContent, 'EN:茶馆', '群名应换成译文');
+    assert.strictEqual(g2.textContent, 'EN:技术探讨与安全防御', '版块名应换成译文');
+    assert.strictEqual(g1.dataset.trTarget, 'en', '译过的名字应记目标语言');
+    tr.setViewerLang('zh');
+    tr.observeNameTranslations(doc);
+    assert.strictEqual(g1.textContent, '茶馆', '切回中文群名应恢复原文');
+    assert.strictEqual(g2.textContent, '技术探讨与安全防御', '切回中文版块名应恢复原文');
+    assert.strictEqual(calls, 1, '恢复原文不应调接口');
+    tr.setViewerLang('en');
+    tr.observeNameTranslations(doc);
+    tr.flushNow();
+    assert.strictEqual(calls, 1, '再切英文缓存命中不应调接口');
+    assert.strictEqual(g1.textContent, 'EN:茶馆', '再切英文缓存命中应立即恢复译文');
+    // same：服务端判同语言，原样保留并记已完成；再跑一次名字 pass 应走缓存，不再调接口。
+    tr._resetForTest();
+    tr.setViewerLang('en');
+    let sameCalls = 0;
+    tr.setBatchFn(async (items) => { sameCalls++; return items.map((it) => ({ translated: it.text, same: true })); });
+    const g3 = makeNameEl('茶馆');
+    const doc3 = { querySelectorAll: (sel) => (sel === '[data-tr-name]' ? [g3] : []) };
+    tr.observeNameTranslations(doc3);
+    tr.flushNow();
+    await sleep13(100);
+    assert.strictEqual(sameCalls, 1, 'same 的名字第一次应调接口');
+    assert.strictEqual(g3.textContent, '茶馆', 'same 的名字应原样保留');
+    assert.strictEqual(g3.dataset.trTarget, 'en', 'same 的名字应记已完成');
+    tr.observeNameTranslations(doc3);
+    tr.flushNow();
+    assert.strictEqual(sameCalls, 1, 'same 的名字再跑名字 pass 不应重复调接口');
+    assert.strictEqual(g3.textContent, '茶馆', 'same 的名字再跑一次仍原样保留');
+    ok('名字翻译：批量换显、切回恢复原文、缓存命中不调接口、same 原样保留');
+    delete globalThis.localStorage;
+    tr._resetForTest();
+  }
+  // 13f. renderer.js 接线：名字打标、搜索消息与公告正文可换显、切换处理器刷队列。
+  {
+    const rendererSrc = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'renderer.js'), 'utf8');
+    assert.ok(rendererSrc.includes('<span data-tr-name="${esc(b.name)}">${esc(b.name)}</span>'), '版块列表应给真实版块名打标');
+    assert.ok(rendererSrc.includes('<b data-tr-name="${esc(g.name)}">${esc(g.name)}</b>'), '会话列表与社区群组应给群名打标');
+    assert.ok(rendererSrc.includes(`$('chatTitle').setAttribute('data-tr-name', name)`), '打开会话时聊天头群名应打标');
+    assert.ok(rendererSrc.includes('<span data-tr-name="${esc(boardName)}">${esc(boardName)}</span>'), '帖子面板版块名应打标');
+    assert.ok(rendererSrc.includes(`trPlaceholder((m.body || '').slice(0, 200))`), '搜索消息正文应有翻译占位');
+    assert.ok(rendererSrc.includes('<div class="post-excerpt">${esc(a.body || \'\')}</div>'), '公告正文应有 post-excerpt 类以便换显');
+    assert.ok(rendererSrc.includes('function refreshDataTranslations()'), '应有切换后刷数据翻译的助手');
+    assert.ok(rendererSrc.includes('refreshDataTranslations();'), '语言切换处理器末尾应刷数据翻译');
+    assert.ok(typeof tr.observeNameTranslations === 'function', 'translate.js 应导出 observeNameTranslations');
+    assert.ok(typeof tr.flushNow === 'function', 'translate.js 应导出 flushNow');
+    assert.ok(typeof tr._handleClick === 'function', 'translate.js 应导出 _handleClick 供测试');
+    ok('renderer.js 接线：名字打标、搜索与公告正文可换显、切换后刷队列');
+  }
+
   console.log(`\nPASS: ${passed} 项全过`);
 }
 

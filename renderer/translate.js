@@ -741,7 +741,33 @@
 
   function setBatchFn(fn) { batchFn = fn; }
 
+  // 正文本体元素：trbox 紧贴的上一兄弟是 .msg-body / .post-excerpt 时，
+  // 译文直接换掉正文显示，trbox 只剩一个“显示原文”口子（v0.3.8 全内容跟随）。
+  function linkedBody(box) {
+    var prev = box ? box.previousElementSibling : null;
+    if (!prev || !prev.classList || !prev.classList.contains) return null;
+    if (prev.classList.contains('msg-body') || prev.classList.contains('post-excerpt')) return prev;
+    return null;
+  }
+  // 只有纯散文正文才能整段换掉：带代码（``` 或行内 `) 的正文只翻散文，
+  // 整换会丢代码块，仍走旧的框下翻译。
+  function isSwappableBody(body, prose) {
+    if (!body || typeof body.textContent !== 'string') return false;
+    if (body.textContent.indexOf('`') !== -1) return false;
+    return proseOf(body.textContent) === prose;
+  }
+
   function renderTranslated(box, text, out) {
+    var body = linkedBody(box);
+    if (body && isSwappableBody(body, text)) {
+      body.textContent = out;
+      if (body.dataset) body.dataset.trTarget = viewerLang();
+      box.innerHTML = '<span class="tr-label">' + escHtml(tr('label')) + '</span>' +
+        ' <button class="tr-toggle" type="button" data-tr-orig="' + escHtml(encodeURIComponent(text)) +
+        '" data-tr-text="' + escHtml(encodeURIComponent(out)) + '">' + escHtml(tr('showOriginal')) + '</button>';
+      if (box.dataset) box.dataset.trSwap = '1';
+      return;
+    }
     box.innerHTML = '<span class="tr-label">' + escHtml(tr('label')) + '</span> <span class="tr-text">' +
       escHtml(out) + '</span>' +
       ' <button class="tr-toggle" type="button" data-tr-orig="' + escHtml(encodeURIComponent(text)) +
@@ -773,9 +799,18 @@
     if (orig === null || text === null) return;
     var boxEl = btn.closest('.trbox');
     if (!boxEl) return;
+    var showingOrig = btn.dataset.showing === '1';
+    // v0.3.8：换显过的正文，切换口子改回正文本身（只认 trSwap 标记过的框，
+    // 带代码走旧框的正文绝不能整段换，否则丢代码块）。
+    var body = (boxEl.dataset && boxEl.dataset.trSwap === '1') ? linkedBody(boxEl) : null;
+    if (body) {
+      body.textContent = showingOrig ? decodeURIComponent(text) : decodeURIComponent(orig);
+      btn.textContent = showingOrig ? tr('showOriginal') : tr('showTranslation');
+      btn.dataset.showing = showingOrig ? '' : '1';
+      return;
+    }
     var span = boxEl.querySelector('.tr-text');
     if (!span) return;
-    var showingOrig = btn.dataset.showing === '1';
     span.textContent = showingOrig ? decodeURIComponent(text) : decodeURIComponent(orig);
     btn.textContent = showingOrig ? tr('showOriginal') : tr('showTranslation');
     btn.dataset.showing = showingOrig ? '' : '1';
@@ -789,12 +824,40 @@
     }
   }
 
-  function enqueue(box, id, immediate) {
+  function enqueue(box, id, immediate, kind) {
     if (queuedIds[id] || !texts[id]) return;
     queuedIds[id] = true;
-    queue.push({ box: box, id: id });
+    queue.push({ box: box, id: id, kind: kind || 'box' });
     if (immediate || queue.length >= QUEUE_TRIGGER) flush();
     else if (!flushTimer) flushTimer = setTimeout(flush, FLUSH_MS);
+  }
+
+  // 名字类任务（v0.3.8）：元素本身即“框”，译文直接换掉元素文本，
+  // 原文永存在 data-tr-name 属性里，随时可恢复；无重试按钮，失败记已完成，
+  // 下次重画/切换时再试（重画即全新元素，不会卡死）。
+  function clearNameJob(job) {
+    if (job.kind === 'name' && job.box && job.box.dataset) delete job.box.dataset.trJobId;
+  }
+  function markNameDone(job, target) {
+    var el = job.box;
+    if (el && el.dataset) { el.dataset.trTarget = target; delete el.dataset.trJobId; }
+  }
+  function applyName(job, text, out, target) {
+    var el = job.box;
+    if (el) el.textContent = out;
+    markNameDone(job, target);
+  }
+  function renderJob(job, text, out, target) {
+    if (job.kind === 'name') applyName(job, text, out, target);
+    else renderTranslated(job.box, text, out);
+  }
+  function renderFail(job, target) {
+    if (job.kind === 'name') { markNameDone(job, target); return; }
+    renderRetry(job.box, job.id);
+  }
+  function renderSame(job, target) {
+    if (job.kind === 'name') { markNameDone(job, target); return; }
+    if (job.box.remove) job.box.remove();
   }
 
   function flush() {
@@ -805,10 +868,10 @@
     var todo = [];
     batch.forEach(function (job) {
       var text = texts[job.id];
-      if (!text) { delete queuedIds[job.id]; return; }
+      if (!text) { delete queuedIds[job.id]; clearNameJob(job); return; }
       var hit = cache.get(text + '\n' + target);
       if (hit !== undefined) {
-        renderTranslated(job.box, text, hit);
+        renderJob(job, text, hit, target);
         delete queuedIds[job.id];
         delete texts[job.id];
       } else todo.push(job);
@@ -823,7 +886,7 @@
       // 未接批量接口（测试里不设、或主进程未就绪）：留重试按钮，不丢文本。
       todo.forEach(function (job) {
         delete queuedIds[job.id];
-        renderRetry(job.box, job.id);
+        renderFail(job, target);
       });
       if (queue.length) flush();
       return;
@@ -836,7 +899,7 @@
       inFlight--;
       todo.forEach(function (job) {
         delete queuedIds[job.id];
-        renderRetry(job.box, job.id);
+        renderFail(job, target);
       });
       if (queue.length) flush();
       return;
@@ -851,39 +914,42 @@
         if (r.translated) {
           delete retries[job.id];
           if (r.same) {
-            // 同语言：不需要翻译框，静默只显示原文
-            if (job.box.remove) job.box.remove();
+            // 同语言：不需要翻译，静默只显示原文（名字类只记已完成，不删元素）
+            renderSame(job, target);
+            // 名字类 same 也进缓存（原文即译文）：下次名字 pass 再入队时走缓存命中，
+            // 不再调接口。正文框不缓存——缓存会把“应静默删框”变成无意义的切换框。
+            if (job.kind === 'name') cache.set(text + '\n' + target, text);
             delete texts[job.id];
           } else if (r.translated === text) {
-            // 服务端漏网的回显：不渲染、不缓存，走重试
-            renderRetry(job.box, job.id);
+            // 服务端漏网的回显：不渲染、不缓存，走重试（名字类无重试按钮，记已完成）
+            renderFail(job, target);
           } else {
             cache.set(text + '\n' + target, r.translated);
-            renderTranslated(job.box, text, r.translated);
+            renderJob(job, text, r.translated, target);
             delete texts[job.id];
           }
         } else if (r.error === 'source language unclear' || r.error === 'text must be 1..5000 chars') {
           delete retries[job.id];
-          if (job.box.remove) job.box.remove(); // 无法判定/不合法：静默只显示原文
+          renderSame(job, target); // 无法判定/不合法：静默只显示原文
           delete texts[job.id];
         } else if (r.error === 'rate_limited') {
           // 节流：自动延迟重试，不用用户点按钮；重试最多 2 次，之后留重试按钮。
           var n = (retries[job.id] || 0) + 1;
           retries[job.id] = n;
           if (n <= MAX_AUTO_RETRY) {
-            (function (box, id) {
+            (function (box, id, kind) {
               setTimeout(function () {
                 if (!texts[id]) return; // 已渲染/已删框：不用再试
                 if (typeof document !== 'undefined' && document.contains && !document.contains(box)) return;
-                enqueue(box, id, true);
+                enqueue(box, id, true, kind);
               }, RETRY_DELAY_MS);
-            })(job.box, job.id);
+            })(job.box, job.id, job.kind);
           } else {
             delete retries[job.id];
-            renderRetry(job.box, job.id);
+            renderFail(job, target);
           }
         } else {
-          renderRetry(job.box, job.id); // 429 / 上游失败：留原文+重试按钮，文本保留
+          renderFail(job, target); // 429 / 上游失败：留原文+重试按钮，文本保留
         }
       });
       if (queue.length) flush();
@@ -891,7 +957,7 @@
       inFlight--;
       todo.forEach(function (job) {
         delete queuedIds[job.id];
-        renderRetry(job.box, job.id); // 网络失败同样留重试按钮，文本保留
+        renderFail(job, target); // 网络失败同样留重试按钮，文本保留
       });
       if (queue.length) flush();
     });
@@ -910,6 +976,36 @@
     });
   }
 
+  // 名字类入口（v0.3.8）：接管 root 下 [data-tr-name] 元素（群名、版块名等），
+  // 原文在 data-tr-name 属性里。先恢复：上次译过的先回原文再重判（切回语言时
+  // 靠这一行恢复，不另记状态）；同语言/不明/过短不入队；已入队的不重复入队。
+  function observeNameTranslations(rootEl) {
+    var scope = rootEl || (typeof document !== 'undefined' ? document : null);
+    if (!scope || !scope.querySelectorAll) return;
+    var target = viewerLang();
+    scope.querySelectorAll('[data-tr-name]').forEach(function (el) {
+      var orig = el.getAttribute ? el.getAttribute('data-tr-name') : null;
+      if (!orig) return;
+      if (el.dataset && el.dataset.trJobId) return;
+      if (el.dataset && el.dataset.trTarget) {
+        if (el.dataset.trTarget === target) return;
+        el.textContent = orig;
+        delete el.dataset.trTarget;
+      }
+      var prose = proseOf(orig);
+      if (!prose || prose.length < 2) return;
+      var src = detectLang(prose);
+      if (src === 'unknown' || src === target) return;
+      var id = 'at' + (++seq);
+      texts[id] = prose;
+      if (el.dataset) el.dataset.trJobId = id;
+      enqueue(el, id, false, 'name');
+    });
+  }
+
+  // 语言切换后立即刷队列（缓存命中当场渲染，不等 250ms 的 coalesce 定时器）。
+  function flushNow() { flush(); }
+
   var api = {
     viewerLang: viewerLang,
     setViewerLang: setViewerLang,
@@ -921,8 +1017,11 @@
     proseOf: proseOf,
     placeholder: placeholder,
     observeTranslations: observeTranslations,
+    observeNameTranslations: observeNameTranslations,
+    flushNow: flushNow,
     setBatchFn: setBatchFn,
     init: init,
+    _handleClick: handleClick,
     _cacheSize: function () { return cache.size; },
     _setRetryDelayMs: function (ms) { if (typeof ms === 'number' && ms > 0) RETRY_DELAY_MS = ms; },
     _resetForTest: function () {

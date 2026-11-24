@@ -310,7 +310,7 @@ async function loadBoards() {
 function renderBoardList() {
   const all = [{ id: null, name: ui('side.allBoards') }, ...state.boards];
   $('boardList').innerHTML = all.map((b) => `
-    <div class="board-item${state.postsBoard === b.id ? ' active' : ''}" data-board="${esc(b.id || '')}">${esc(b.name)}</div>`).join('')
+    <div class="board-item${state.postsBoard === b.id ? ' active' : ''}" data-board="${esc(b.id || '')}">${b.id ? `<span data-tr-name="${esc(b.name)}">${esc(b.name)}</span>` : esc(b.name)}</div>`).join('')
     || '<div class="muted small" style="padding:0 10px">' + ui('side.noBoards') + '</div>';
   $('boardList').querySelectorAll('.board-item').forEach((el) => {
     el.addEventListener('click', () => {
@@ -319,6 +319,7 @@ function renderBoardList() {
       showPane('posts');
     });
   });
+  if (window.ChimeraTranslate && window.ChimeraTranslate.observeNameTranslations) window.ChimeraTranslate.observeNameTranslations(document);
 }
 
 function renderConvList() {
@@ -331,7 +332,7 @@ function renderConvList() {
       return `
       <div class="item" data-kind="group" data-id="${esc(g.id)}">
         ${avatarHtml(g.name)}
-        <div class="item-main"><div class="item-name"><b>${esc(g.name)}</b>${member ? '' : '<span class="badge-not-joined">' + ui('side.notJoined') + '</span>'}<span class="unread" data-unread="${esc(g.id)}"></span></div>
+        <div class="item-main"><div class="item-name"><b data-tr-name="${esc(g.name)}">${esc(g.name)}</b>${member ? '' : '<span class="badge-not-joined">' + ui('side.notJoined') + '</span>'}<span class="unread" data-unread="${esc(g.id)}"></span></div>
         <span class="item-sub">${g.kind === 'chat' ? ui('side.groupChat') : esc(g.kind || '')}${g.private ? ui('side.private') : ''}</span></div>
       </div>`;
     }).join('') || '<div class="empty-note">' + ui('side.noGroups') + '</div>';
@@ -352,6 +353,7 @@ function renderConvList() {
     if (state.open) el.classList.toggle('active', el.dataset.kind === state.open.kind && el.dataset.id === state.open.id);
   });
   paintUnreadBadges();
+  if (window.ChimeraTranslate && window.ChimeraTranslate.observeNameTranslations) window.ChimeraTranslate.observeNameTranslations(document);
 }
 
 // ---------- 右侧栏：在线账号（与网页版 #rightbar 同口径，用 loadAll 已拉的 accounts） ----------
@@ -421,6 +423,10 @@ async function openConv(kind, id) {
     el.classList.toggle('active', el.dataset.kind === kind && el.dataset.id === id);
   });
   $('chatTitle').textContent = name;
+  // 群名跟随语言（v0.3.8），私信人名不动。
+  if (kind === 'group') $('chatTitle').setAttribute('data-tr-name', name);
+  else $('chatTitle').removeAttribute('data-tr-name');
+  if (window.ChimeraTranslate && window.ChimeraTranslate.observeNameTranslations) window.ChimeraTranslate.observeNameTranslations(document);
   $('chatMeta').textContent = kind === 'group' ? ui('chat.metaGroup') : ui('chat.metaDm');
   // 未加入的群：消息照常看，输入框禁用、横幅给加入按钮（v0.3.1）。
   const member = kind === 'group'
@@ -765,7 +771,7 @@ function renderFeedPosts() {
   const boardName = state.postsBoard
     ? (state.boards.find((b) => b.id === state.postsBoard)?.name || state.postsBoard)
     : '';
-  if (label) label.textContent = boardName ? ui('posts.boardLabel') + boardName : '';
+  if (label) label.innerHTML = boardName ? esc(ui('posts.boardLabel')) + `<span data-tr-name="${esc(boardName)}">${esc(boardName)}</span>` : '';
   if (!posts.length) {
     box.innerHTML = `<div class="empty-note">${state.postsFeed === 'following' ? ui('posts.emptyFollowing') : (boardName ? ui('posts.emptyBoard') : ui('posts.empty'))}</div>`;
     return;
@@ -777,6 +783,7 @@ function renderFeedPosts() {
     return postCardHtml(p, mine || owner);
   }).join('');
   if (window.ChimeraTranslate) window.ChimeraTranslate.observeTranslations(box);
+  if (window.ChimeraTranslate && window.ChimeraTranslate.observeNameTranslations) window.ChimeraTranslate.observeNameTranslations(document);
 }
 
 async function loadPosts() {
@@ -869,12 +876,13 @@ function renderSearchResults() {
           : (m.author && m.author !== (me && me.username) ? ` data-open-dm="${esc(m.author)}"` : '');
         return `<div class="search-msg"${openAttr}>
         <div class="post-meta">${avatarHtml(m.author || '?', 'avatar-sm')}<span><button class="linklike" data-profile="${esc(m.author || '')}">${esc(m.author || '')}</button> · ${esc(where)} · ${esc(fmtTime(m.ts))}</span></div>
-        <div class="post-excerpt">${esc((m.body || '').slice(0, 200))}</div>
+        <div class="post-excerpt">${esc((m.body || '').slice(0, 200))}</div>${trPlaceholder((m.body || '').slice(0, 200))}
       </div>`;
       }).join('')
     : '<h3 class="search-sec">' + uiFmt('search.msgsSec', 0) + '</h3><div class="empty-note">' + ui('search.noMsgs') + '</div>';
   box.innerHTML = postHtml + msgHtml;
   if (window.ChimeraTranslate) window.ChimeraTranslate.observeTranslations(box);
+  if (window.ChimeraTranslate && window.ChimeraTranslate.observeNameTranslations) window.ChimeraTranslate.observeNameTranslations(document);
 }
 
 $('globalSearchInput').addEventListener('keydown', (e) => {
@@ -1208,6 +1216,7 @@ function renderTeamPosts() {
     return postCardHtml(p, mine || admin);
   }).join('');
   if (window.ChimeraTranslate) window.ChimeraTranslate.observeTranslations(box);
+  if (window.ChimeraTranslate && window.ChimeraTranslate.observeNameTranslations) window.ChimeraTranslate.observeNameTranslations(document);
 }
 
 function renderCommunity() {
@@ -1257,7 +1266,7 @@ function renderCommunity() {
       </div>` : '<p class="muted small">' + ui('community.onlyMembers') + '</p>'}
     </div>
     <div class="comm-section"><h3>${ui('community.ann')}</h3>
-    ${anns.map((a) => `<div class="ann-card"><div class="post-meta">${avatarHtml(a.author || '?', 'avatar-sm')}<span>${esc(a.author || '')} · ${esc(fmtTime(a.ts))}</span>${manage ? `<button class="btn ghost" data-action="delete-ann" data-id="${esc(a.id || a.annId || '')}" style="margin-left:auto;padding:2px 8px;font-size:12px">${ui('community.delete')}</button>` : ''}</div><div>${esc(a.body || '')}</div>${trPlaceholder(a.body || '')}</div>`).join('') || '<div class="muted small">' + ui('community.noAnn') + '</div>'}
+    ${anns.map((a) => `<div class="ann-card"><div class="post-meta">${avatarHtml(a.author || '?', 'avatar-sm')}<span>${esc(a.author || '')} · ${esc(fmtTime(a.ts))}</span>${manage ? `<button class="btn ghost" data-action="delete-ann" data-id="${esc(a.id || a.annId || '')}" style="margin-left:auto;padding:2px 8px;font-size:12px">${ui('community.delete')}</button>` : ''}</div><div class="post-excerpt">${esc(a.body || '')}</div>${trPlaceholder(a.body || '')}</div>`).join('') || '<div class="muted small">' + ui('community.noAnn') + '</div>'}
     ${manage ? `<div class="comm-form"><textarea id="newAnnBody" placeholder="${ui('community.annPh')}"></textarea>
       <div class="form-row"><button class="btn" data-action="publish-ann">${ui('community.publishAnn')}</button>
       <span class="comm-err" id="newAnnErr"></span></div></div>` : ''}
@@ -1280,9 +1289,9 @@ function renderCommunity() {
       <span class="comm-err" id="addMemberErr"></span></div></div>` : ''}
     </div>
     <div class="comm-section"><h3>${ui('community.linkedGroups')}</h3>
-    <div class="group-list">${groups.map((g) => `<div class="item" data-gid="${esc(g.id)}">${avatarHtml(g.name)}<div class="item-main"><div class="item-name"><b>${esc(g.name)}</b></div><span class="item-sub">${esc(g.kind || '')}${g.visibility === 'private' ? ui('community.privateSuffix') : ''}</span></div></div>`).join('') || '<div class="muted small">' + ui('community.noGroups') + '</div>'}</div>
+    <div class="group-list">${groups.map((g) => `<div class="item" data-gid="${esc(g.id)}">${avatarHtml(g.name)}<div class="item-main"><div class="item-name"><b data-tr-name="${esc(g.name)}">${esc(g.name)}</b></div><span class="item-sub">${esc(g.kind || '')}${g.visibility === 'private' ? ui('community.privateSuffix') : ''}</span></div></div>`).join('') || '<div class="muted small">' + ui('community.noGroups') + '</div>'}</div>
     ${manage ? `<div class="form-row"><button class="btn" data-action="toggle-edit-groups">${state.editingGroups ? ui('community.collapseGroups') : ui('community.editGroups')}</button></div>
-    ${state.editingGroups ? `<div class="comm-form"><div class="check-list">${(state.groups || []).map((g) => `<label><input type="checkbox" data-group-check="${esc(g.id)}" ${groups.some((x) => x.id === g.id) ? 'checked' : ''}> ${esc(g.name)}<span class="muted small">${g.visibility === 'private' ? ui('community.private') : ui('community.public')}</span></label>`).join('') || '<span class="muted small">' + ui('community.noGroups') + '</span>'}</div>
+    ${state.editingGroups ? `<div class="comm-form"><div class="check-list">${(state.groups || []).map((g) => `<label><input type="checkbox" data-group-check="${esc(g.id)}" ${groups.some((x) => x.id === g.id) ? 'checked' : ''}> <span data-tr-name="${esc(g.name)}">${esc(g.name)}</span><span class="muted small">${g.visibility === 'private' ? ui('community.private') : ui('community.public')}</span></label>`).join('') || '<span class="muted small">' + ui('community.noGroups') + '</span>'}</div>
       <div class="form-row"><button class="btn primary" data-action="save-groups">${ui('community.saveGroups')}</button>
       <span class="comm-err" id="saveGroupsErr"></span></div></div>` : ''}` : ''}
     </div>
@@ -1294,6 +1303,7 @@ function renderCommunity() {
   const sel = $('teamSelect');
   if (sel) sel.addEventListener('change', () => switchTeam(sel.value));
   if (window.ChimeraTranslate) window.ChimeraTranslate.observeTranslations(box);
+  if (window.ChimeraTranslate && window.ChimeraTranslate.observeNameTranslations) window.ChimeraTranslate.observeNameTranslations(document);
   // 已加载的讨论列表随重渲染恢复（切换表单/语言/改角色失败等 bare render 不会
   // 把列表打回“加载中…”）；未加载时留占位，由调用方 loadTeamPosts() 拉取。
   if (state.teamPostsLoaded) renderTeamPosts();
@@ -1679,6 +1689,14 @@ function trPlaceholder(text) {
   return window.ChimeraTranslate.placeholder(text);
 }
 
+// 数据内容跟随语言（v0.3.8）：名字类入队 + 立即刷队列（缓存命中当场渲染）。
+// 只在语言切换处理器末尾调；各渲染函数只入队（250ms 合并定时器刷）。
+function refreshDataTranslations() {
+  if (typeof window === 'undefined' || !window.ChimeraTranslate) return;
+  if (window.ChimeraTranslate.observeNameTranslations) window.ChimeraTranslate.observeNameTranslations(document);
+  if (window.ChimeraTranslate.flushNow) window.ChimeraTranslate.flushNow();
+}
+
 function syncLangBtn() {
   const b = $('langToggle');
   if (!b) return;
@@ -1764,6 +1782,7 @@ $('langToggle').addEventListener('click', async () => {
   if (!$('pane-team').classList.contains('hidden')) renderTeam();
   if (!$('pane-search').classList.contains('hidden') && state.searchResults) renderSearchResults();
   if (!$('pane-home').classList.contains('hidden')) await loadHomeStats();
+  refreshDataTranslations();
 });
 
 syncChrome();
