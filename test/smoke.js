@@ -52,7 +52,8 @@ function startMockSeed() {
 // Mock 论坛（仅 §3b 节点上传测试用）：/api/health + /api/node/headers
 // （按真实服务端口径验链：401/403/409/400 + ack）+ /api/heartbeat +
 // /api/stream（SSE：hello 后发 seq 101 再跳到 104，供 gap 测试）+
-// POST /api/groups/:id/join（v0.3.2 自加入群：公开群 200、私密群 403）。
+// POST /api/groups/:id/join（v0.3.2 自加入群：公开群 200、私密群 403）+
+// POST /api/node/activate（v0.3.3 激活即分配：人类 Bearer 201、无 token 401）。
 // 只有 token 'test-node-token' 是节点身份；'test-ai-token' 是 AI 账号（403）。
 // state 暴露出来供测试断言与预置（setNodeState 模拟服务端超前）。
 function startMockForum() {
@@ -91,6 +92,17 @@ function startMockForum() {
         if (!req.headers.authorization) { res.writeHead(401); res.end(JSON.stringify({ ok: false, error: 'login required' })); return; }
         if (joinM[1] === 'grp-private') { res.writeHead(403); res.end(JSON.stringify({ ok: false, error: 'private group: only members or the forum owner can add you' })); return; }
         res.end(JSON.stringify({ ok: true, group: { id: joinM[1], name: 'mock-group', members: [{ name: 'me', type: 'human', joinedTs: new Date().toISOString() }] } })); return;
+      }
+      // POST /api/node/activate（v0.3.3 激活即分配）：人类 Bearer 201；
+      // 无 token 401；X-AI-Token（AI/节点）403（与真实服务端同一口径）。
+      if (req.method === 'POST' && url.pathname === '/api/node/activate') {
+        if (req.headers['x-ai-token']) { res.writeHead(403); res.end(JSON.stringify({ ok: false, error: 'only human accounts can activate a node' })); return; }
+        if (!req.headers.authorization) { res.writeHead(401); res.end(JSON.stringify({ ok: false, error: 'login required' })); return; }
+        let data = null;
+        try { data = JSON.parse(body || '{}'); } catch { res.writeHead(400); res.end(JSON.stringify({ ok: false, error: 'invalid JSON' })); return; }
+        const name = (data && data.name) || 'testhuman-node';
+        if (!/^[a-z0-9][a-z0-9_-]{1,31}$/.test(name)) { res.writeHead(400); res.end(JSON.stringify({ ok: false, error: 'AI name must be 2..32 chars' })); return; }
+        res.writeHead(201); res.end(JSON.stringify({ ok: true, account: { id: 'acc-mock-node', name, type: 'node', owner: 'testhuman', role: 'member' }, apiToken: 'mock-node-token' })); return;
       }
       if (url.pathname === '/api/node/headers') {
         if (req.method === 'GET') {
@@ -412,6 +424,20 @@ async function main() {
       (e) => e.status === 401,
     );
     ok('自加入群：无 token 回 401');
+
+    // (g) 节点激活即分配（v0.3.3）：人类 Bearer 回 201（节点账号 + token）；无 token 401。
+    const activated = await withTimeout(mockClient.activateNode('test-token'), 15000, 'POST /api/node/activate');
+    assert.strictEqual(activated.account.name, 'testhuman-node', '派生名应为 testhuman-node');
+    assert.strictEqual(activated.account.type, 'node', '应为节点账号');
+    assert.strictEqual(activated.account.owner, 'testhuman', 'owner 应为本人');
+    assert.strictEqual(activated.account.role, 'member', '节点永为 member');
+    assert.ok(typeof activated.apiToken === 'string' && activated.apiToken.length > 0, '应回 apiToken');
+    ok('节点激活：人类会话回 201，分配节点账号 testhuman-node');
+    await assert.rejects(
+      withTimeout(mockClient.activateNode(null), 15000, 'POST /api/node/activate 无 token'),
+      (e) => e.status === 401,
+    );
+    ok('节点激活：无 token 回 401');
   } finally {
     forum.close();
     fs.rmSync(tmp3b, { recursive: true, force: true });

@@ -260,7 +260,12 @@ function registerIpc() {
   });
 
   // ---- node IPC: switch + status + log ----
-  ipcMain.handle('node:status', () => (nodeManager ? nodeManager.status() : { state: 'off', enabled: false }));
+  ipcMain.handle('node:status', () => {
+    const st = nodeManager ? nodeManager.status() : { state: 'off', enabled: false };
+    // 激活时分配的节点账号名（仅展示；token 不在状态里）。
+    st.nodeAccountName = store.state.node.nodeAccountName || null;
+    return st;
+  });
   ipcMain.handle('node:set-enabled', async (_e, enabled) => {
     const on = !!enabled;
     store.update((s) => { s.node.enabled = on; });
@@ -268,6 +273,28 @@ function registerIpc() {
   });
   ipcMain.handle('node:sync-now', async () => nodeManager.syncOnce());
   ipcMain.handle('node:headers', (_e, limit) => nodeManager._tailHeaders(limit || 50));
+  // ---- 节点激活（v0.3.3）：人类登录态调 /api/node/activate，服务端自动
+  // 分配节点账号（owner=本人）；返回的 apiToken 只写进节点 token 文件
+  // （0600），绝不写 state.json、不进日志。已绑定过（token 文件已存在）
+  // 时不重复激活。运行中的节点管理器立即用上新 token（下次上传即生效）。
+  ipcMain.handle('node:activate', async () => {
+    const token = sessionToken();
+    if (!token) throw new Error('请先登录人类账号，再激活节点');
+    if (nodeManager && nodeManager._readForumToken()) throw new Error('节点已激活过，无需重复激活');
+    const data = await client.activateNode(token);
+    if (!data || !data.apiToken || !data.account || !data.account.name) throw new Error('激活失败：服务端未返回节点账号');
+    const fs = require('fs');
+    const nodeDir = userDataFile('node');
+    fs.mkdirSync(nodeDir, { recursive: true });
+    const tokenFile = path.join(nodeDir, 'forum-token');
+    fs.writeFileSync(tokenFile, data.apiToken, { mode: 0o600 });
+    store.update((s) => {
+      s.node.forumTokenFile = tokenFile;
+      s.node.nodeAccountName = data.account.name;
+    });
+    if (nodeManager) nodeManager.config.forumTokenFile = tokenFile;
+    return { account: data.account };
+  });
 }
 
 app.whenReady().then(async () => {

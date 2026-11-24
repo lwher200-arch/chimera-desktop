@@ -39,6 +39,7 @@ contextBridge.exposeInMainWorld('chimera', {
     setEnabled: (enabled) => ipcRenderer.invoke('node:set-enabled', enabled),
     syncNow: () => ipcRenderer.invoke('node:sync-now'),
     headers: (limit) => ipcRenderer.invoke('node:headers', limit),
+    activate: () => ipcRenderer.invoke('node:activate'),
   },
   // 实时（WS 优先）：typing / receipt 走 WS 通道；SSE 回落时返回 false，
   // 调用方仍可走 REST。渲染进程暂未调用，供后续接线用。

@@ -818,7 +818,17 @@ async function refreshNodePanel() {
       <div class="stat-card"><div class="stat-label">最近上传</div><div class="stat-value">${esc(fmtTime(up.lastUploadAt) || '—')}</div></div>
       <div class="stat-card"><div class="stat-label">上传失败</div><div class="stat-value">${up.failures || 0} 次</div></div>
       <div class="stat-card"><div class="stat-label">链自检</div><div class="stat-value">${up.chainOk === false ? '异常' : '正常'}</div></div>
-      <div class="stat-card"><div class="stat-label">论坛身份</div><div class="stat-value">${st.hasForumIdentity ? '已绑定' : '未绑定（仅本地跑）'}</div></div>`;
+      <div class="stat-card"><div class="stat-label">论坛身份</div><div class="stat-value">${st.hasForumIdentity ? '已绑定' + (st.nodeAccountName ? '（' + esc(st.nodeAccountName) + '）' : '') : '未绑定（仅本地跑）'}</div></div>`;
+    // 激活即分配（v0.3.3）：未绑定时露激活按钮；已绑定时只展示账号名。
+    const actBtn = $('nodeActivateBtn');
+    const actText = $('nodeActivateText');
+    if (st.hasForumIdentity) {
+      actText.textContent = '论坛身份：' + (st.nodeAccountName || '已绑定') + '（归你所有；绑定你的 AI 可共享这个节点账号）';
+      actBtn.classList.add('hidden');
+    } else {
+      actText.textContent = '还没绑定论坛身份，节点只能本地跑，不上传。点“激活节点”，用当前登录的人类账号自动分配一个节点账号（归你所有），token 只存本机。';
+      actBtn.classList.remove('hidden');
+    }
   } catch (err) {
     $('nodeStateText').textContent = '节点状态读取失败：' + (err.message || err);
   }
@@ -841,6 +851,20 @@ $('nodeToggle').addEventListener('change', async (e) => {
 $('nodeSyncBtn').addEventListener('click', async () => {
   try { await window.chimera.node.syncNow(); } catch (err) { alert('同步失败：' + (err.message || err)); }
   await refreshNodePanel();
+});
+
+// 激活即分配（v0.3.3）：人类登录态调服务端 /api/node/activate，分配到的
+// 节点账号名由主进程存进 state，token 只写本机 0600 文件。
+$('nodeActivateBtn').addEventListener('click', async () => {
+  const btn = $('nodeActivateBtn');
+  btn.disabled = true;
+  try {
+    const data = await window.chimera.node.activate();
+    const name = data && data.account && data.account.name;
+    await refreshNodePanel();
+    if (name) alert('节点已激活，分配到的节点账号：' + name);
+  } catch (err) { alert('激活失败：' + (err.message || err)); }
+  finally { btn.disabled = false; }
 });
 
 $('nodeHeadersBtn').addEventListener('click', async () => {
