@@ -749,7 +749,7 @@ function isTeamMember(community, me) { return teamRole(community, me) !== null; 
 
 async function loadCommunity() {
   const box = $('communityBody');
-  if (state.community) { renderCommunity(); return; }
+  if (state.community) { renderCommunity(); loadTeamPosts(); return; }
   box.innerHTML = '<div class="muted">加载中…</div>';
   try {
     const list = await window.chimera.api.communities();
@@ -920,6 +920,9 @@ function renderCommunity() {
   const sel = $('teamSelect');
   if (sel) sel.addEventListener('change', () => switchTeam(sel.value));
   if (window.ChimeraTranslate) window.ChimeraTranslate.observeTranslations(box);
+  // 已加载的讨论列表随重渲染恢复（切换表单/语言/改角色失败等 bare render 不会
+  // 把列表打回“加载中…”）；未加载时留占位，由调用方 loadTeamPosts() 拉取。
+  if (state.teamPostsLoaded) renderTeamPosts();
 }
 
 // 社区页所有写操作走一个委托处理器：服务端原话展示，不自己编理由。
