@@ -21,6 +21,8 @@ const { RealtimeClient } = require('./lib/realtimeClient');
 const { NodeManager } = require('./lib/nodeManager');
 const { ServerResolver, PRIMARY_BASE } = require('./lib/serverResolver');
 const { AppUpdater } = require('./lib/appUpdater');
+const workspaceBinding = require('./lib/workspaceBinding');
+const os = require('node:os');
 
 const API_BASE = process.env.CHIMERA_API_BASE || PRIMARY_BASE;
 
@@ -40,6 +42,28 @@ let realtime = null;
 let nodeManager = null;
 let updater = null;
 let lastTransport = null; // 最近一次 realtime:transport，供窗口加载完后补发
+// 工作区绑定（融合 P0）：活跃绑定 id + 每 5 分钟 seen 心跳定时器。
+// seen 只在“有活跃绑定且会话有效”时调，失败静默等下次；私钥/签名绝不进日志。
+let workspaceActiveBindingId = null;
+let workspaceSeenTimer = null;
+
+function startWorkspaceSeenTimer() {
+  if (workspaceSeenTimer) return;
+  workspaceSeenTimer = setInterval(async () => {
+    if (!workspaceActiveBindingId) return;
+    const token = sessionToken();
+    if (!token) return; // 会话无效时不调，等下次
+    try {
+      await client.workspaceSeen(token, workspaceActiveBindingId);
+    } catch { /* 失败静默等下次 */ }
+  }, 5 * 60 * 1000);
+  if (workspaceSeenTimer.unref) workspaceSeenTimer.unref();
+}
+
+function stopWorkspaceSeenTimer() {
+  if (workspaceSeenTimer) { clearInterval(workspaceSeenTimer); workspaceSeenTimer = null; }
+  workspaceActiveBindingId = null;
+}
 
 function userDataFile(name) {
   return path.join(app.getPath('userData'), name);
@@ -266,6 +290,55 @@ function registerIpc() {
   ipcMain.handle('api:toggle-follow', (_e, { name }) => client.toggleFollow(sessionToken(), name));
   ipcMain.handle('api:following-feed', (_e, { limit, before_id }) => client.getFollowingFeed(sessionToken(), { limit, before_id }));
   ipcMain.handle('api:update-me', (_e, { patch }) => client.updateMe(sessionToken(), patch));
+  // ---- 工作区绑定（融合 P0）：登记 + 只读在线状态 ----
+  // api:workspace-challenge：取一次性挑战（5 分钟过期）。
+  ipcMain.handle('api:workspace-challenge', () => client.workspaceChallenge(sessionToken()));
+  // api:workspace-bind：challenge → 本机签名 → 注册，全程在主进程完成
+  // （私钥只在主进程读，渲染进程拿不到私钥与签名原文）。
+  // 渲染进程只传 challenge；keyId/公钥/设备名由本机密钥派生。
+  // 设备名默认 os.hostname()，P0 不做改名 UI。
+  ipcMain.handle('api:workspace-bind', async (_e, { challenge } = {}) => {
+    const token = sessionToken();
+    if (!token) throw new Error('请先登录人类账号，再绑定工作区');
+    if (!challenge) throw new Error('绑定失败：缺少挑战串');
+    const { keyId, publicKey } = workspaceBinding.ensureKeyPair();
+    const signature = workspaceBinding.signChallenge(
+      challenge, workspaceBinding.readPrivateKeyPem());
+    const data = await client.registerWorkspaceBinding(token, {
+      keyId,
+      publicKey,
+      deviceName: workspaceBinding.sanitizeDeviceName(os.hostname()),
+      challenge,
+      signature,
+    });
+    if (data && data.binding && data.binding.id) {
+      workspaceActiveBindingId = data.binding.id;
+      startWorkspaceSeenTimer();
+    }
+    return data;
+  });
+  // api:workspace-bindings：本人全部行（含已解绑）；有活跃绑定时起 seen 定时器。
+  ipcMain.handle('api:workspace-bindings', async () => {
+    const data = await client.myWorkspaceBindings(sessionToken());
+    const active = (data && data.bindings || []).find((b) => !b.unlinkedTs);
+    if (active) {
+      workspaceActiveBindingId = active.id;
+      startWorkspaceSeenTimer();
+    } else {
+      stopWorkspaceSeenTimer();
+    }
+    return data;
+  });
+  // api:workspace-unlink：解绑（P0 不做解绑按钮，验收走 API；留接口供后续接线）。
+  // 服务端置 unlinkedTs、registryStatus=revoked-pending；DO 吊销待 Owner 供 setup token。
+  ipcMain.handle('api:workspace-unlink', async (_e, { id } = {}) => {
+    const data = await client.unlinkWorkspaceBinding(sessionToken(), id);
+    if (id && workspaceActiveBindingId === id) stopWorkspaceSeenTimer();
+    return data;
+  });
+  // api:workspace-seen：手动打一次 lastSeen（定时器在主进程另跑）。
+  ipcMain.handle('api:workspace-seen', (_e, { id } = {}) =>
+    client.workspaceSeen(sessionToken(), id));
   // 加群（v0.3.2）：调 /join 自加（服务端按调用方身份加人）；服务端不放行时原样抛错，渲染进程展示原话。
   ipcMain.handle('api:join-group', (_e, { groupId }) =>
     client.joinGroup(sessionToken(), groupId));

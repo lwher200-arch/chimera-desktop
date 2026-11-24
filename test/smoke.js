@@ -66,6 +66,10 @@ function startMockForum() {
     node: { lastSeq: 0, lastHash: '0'.repeat(64), received: 0, heads: [] },
     uploads: [], // 每次成功上传的 batch（headers 数组）
     heartbeats: 0,
+    // 工作区绑定（融合 P0）：bindings 行 + 内存 challenge（5 分钟过期，一次性）。
+    workspaceBindings: [], // {id, accountId, keyId, publicKey, deviceName, createdTs, lastSeenTs, unlinkedTs, registryStatus}
+    workspaceChallenges: {}, // challenge -> {accountName, expiresAt, used}
+    workspaceBindingSeq: 0,
     failNextUpload: 0, // >0 时下几次上传回 500（重试测试用）
     // mock 团队：创建人 testhuman，成员 testai；otherhuman/stranger 初始非成员。
     communities: [{
@@ -210,6 +214,90 @@ function startMockForum() {
       const pubPost = (p) => ({ ...p, likesCount: p.likes.length, likedBy: p.likes.map((l) => l.name), replyCount: [...state.teamPosts, ...state.feedPosts].filter((x) => x.reply_to === p.id && !x.deleted).length });
       // v0.3.5：主帖子页与团队讨论共用一张帖子表（mock 里分两个数组），点赞/置顶/删帖两边都找。
       const findAnyPost = (id) => [...state.teamPosts, ...state.feedPosts].find((x) => x.id === id && !x.deleted);
+      // ---- 工作区绑定（融合 P0，mock 口径与契约一致） ----
+      // 校验顺序：会话人类 → challenge 有效且未用过（消费掉）→ 签名验过（401）
+      // → keyId == ed25519-sha256(publicKey)（400）→ deviceName ≤64（400）
+      // → 同 keyId 已有活跃绑定：同账号幂等、他账号 409。
+      // 解绑：置 unlinkedTs、registryStatus=revoked-pending（DO 吊销待 Owner
+      // 供 setup token，mock 不调 DO）；已解绑再调回 409；解绑后 seen 回 409。
+      const wsAccountId = (name) => {
+        const a = state.accounts.find((x) => x.name === name);
+        return a ? a.id : 'acc-' + name;
+      };
+      const wsVerifySig = (challenge, publicKeyB64, signatureB64) => {
+        try {
+          const raw = Buffer.from(String(publicKeyB64 || ''), 'base64');
+          if (raw.length !== 32) return false;
+          const der = Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), raw]);
+          const pub = crypto.createPublicKey({ key: der, format: 'der', type: 'spki' });
+          return crypto.verify(null, Buffer.from(String(challenge), 'utf8'), pub,
+            Buffer.from(String(signatureB64 || ''), 'base64'));
+        } catch { return false; }
+      };
+      const wsKeyId = (publicKeyB64) => {
+        const raw = Buffer.from(String(publicKeyB64 || ''), 'base64');
+        return 'ed25519-' + crypto.createHash('sha256').update(raw).digest('hex');
+      };
+      if (req.method === 'POST' && url.pathname === '/api/workspace-bindings/challenge') {
+        const me = bearerMe(); if (!me) return comm401();
+        const challenge = 'wsbind:' + crypto.randomBytes(32).toString('hex');
+        state.workspaceChallenges[challenge] = { accountName: me.name, expiresAt: Date.now() + 5 * 60 * 1000, used: false };
+        res.end(JSON.stringify({ ok: true, challenge, expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString() })); return;
+      }
+      if (req.method === 'POST' && url.pathname === '/api/workspace-bindings') {
+        const me = bearerMe(); if (!me) return comm401();
+        const data = commJson(); if (!data) return commErr(400, 'invalid JSON');
+        const rec = state.workspaceChallenges[data.challenge];
+        if (!rec || rec.used || Date.now() > rec.expiresAt || rec.accountName !== me.name) return commErr(400, 'challenge invalid or expired');
+        rec.used = true; // 一次性：校验通过即消费，重放必 400
+        if (!wsVerifySig(data.challenge, data.publicKey, data.signature)) return commErr(401, 'invalid signature');
+        if (data.keyId !== wsKeyId(data.publicKey)) return commErr(400, 'keyId does not match publicKey');
+        const deviceName = String(data.deviceName || '').replace(/[\u0000-\u001f\u007f]/g, '').trim();
+        if (!deviceName || deviceName.length > 64) return commErr(400, 'deviceName must be 1..64 chars');
+        const existing = state.workspaceBindings.find((b) => b.keyId === data.keyId && !b.unlinkedTs);
+        if (existing) {
+          if (existing.accountId !== wsAccountId(me.name)) return commErr(409, 'keyId already bound to another account');
+          existing.deviceName = deviceName;
+          existing.lastSeenTs = new Date().toISOString();
+          res.end(JSON.stringify({ ok: true, binding: existing })); return;
+        }
+        state.workspaceBindingSeq += 1;
+        const row = {
+          id: 'wsb-' + state.workspaceBindingSeq,
+          accountId: wsAccountId(me.name),
+          keyId: data.keyId, publicKey: data.publicKey, deviceName,
+          createdTs: new Date().toISOString(), lastSeenTs: new Date().toISOString(),
+          unlinkedTs: null, registryStatus: 'pending',
+        };
+        state.workspaceBindings.push(row);
+        res.end(JSON.stringify({ ok: true, binding: row })); return;
+      }
+      if (req.method === 'GET' && url.pathname === '/api/workspace-bindings/me') {
+        const me = bearerMe(); if (!me) return comm401();
+        const mine = state.workspaceBindings.filter((b) => b.accountId === wsAccountId(me.name));
+        res.end(JSON.stringify({ ok: true, bindings: mine })); return;
+      }
+      const wsUnlinkM = /^\/api\/workspace-bindings\/([^/]+)\/unlink$/.exec(url.pathname);
+      if (req.method === 'POST' && wsUnlinkM) {
+        const me = bearerMe(); if (!me) return comm401();
+        const row = state.workspaceBindings.find((b) => b.id === decodeURIComponent(wsUnlinkM[1]));
+        if (!row) return commErr(404, 'binding not found');
+        if (row.accountId !== wsAccountId(me.name) && me.name !== 'coldhao') return commErr(403, 'not your binding');
+        if (row.unlinkedTs) return commErr(409, 'binding already unlinked');
+        row.unlinkedTs = new Date().toISOString();
+        row.registryStatus = 'revoked-pending';
+        res.end(JSON.stringify({ ok: true, binding: row })); return;
+      }
+      const wsSeenM = /^\/api\/workspace-bindings\/([^/]+)\/seen$/.exec(url.pathname);
+      if (req.method === 'POST' && wsSeenM) {
+        const me = bearerMe(); if (!me) return comm401();
+        const row = state.workspaceBindings.find((b) => b.id === decodeURIComponent(wsSeenM[1]));
+        if (!row) return commErr(404, 'binding not found');
+        if (row.accountId !== wsAccountId(me.name)) return commErr(403, 'not your binding');
+        if (row.unlinkedTs) return commErr(409, 'binding already unlinked');
+        row.lastSeenTs = new Date().toISOString();
+        res.end(JSON.stringify({ ok: true, lastSeenTs: row.lastSeenTs })); return;
+      }
       // POST /api/communities（建队）
       if (req.method === 'POST' && url.pathname === '/api/communities') {
         const me = bearerMe(); if (!me) return comm401();
@@ -425,9 +513,20 @@ function startMockForum() {
         const messages = state.feedMessages.filter((m) => ((m.body || '') + ' ' + (m.author || '')).toLowerCase().includes(needle));
         res.end(JSON.stringify({ ok: true, q, posts: posts.slice(0, limit).map(pubPost), totalPosts: posts.length, hasMorePosts: posts.length > limit, messages: messages.slice(0, limit), totalMessages: messages.length, hasMoreMessages: messages.length > limit })); return;
       }
-      // GET /api/accounts（v0.3.5 资料卡）：公开全量。
+      // GET /api/accounts（v0.3.5 资料卡）：公开全量；融合 P0：每账号加
+      // hasWorkspace（有活跃绑定）、workspaceOnline（活跃绑定且 lastSeen 15 分钟内），
+      // 不加 keyId/deviceName/publicKey/指纹。
       if (req.method === 'GET' && url.pathname === '/api/accounts') {
-        res.end(JSON.stringify({ ok: true, accounts: state.accounts })); return;
+        const now = Date.now();
+        const accounts = state.accounts.map((a) => {
+          const active = state.workspaceBindings.filter((b) => b.accountId === a.id && !b.unlinkedTs);
+          return {
+            ...a,
+            hasWorkspace: active.length > 0,
+            workspaceOnline: active.some((b) => b.lastSeenTs && now - Date.parse(b.lastSeenTs) <= 15 * 60 * 1000),
+          };
+        });
+        res.end(JSON.stringify({ ok: true, accounts })); return;
       }
       // PATCH /api/accounts/me（v0.3.5 改自己资料）：须登录；只接受资料字段。
       if (req.method === 'PATCH' && url.pathname === '/api/accounts/me') {
@@ -1112,6 +1211,173 @@ async function main() {
   } finally {
     forum.close();
     fs.rmSync(tmp3b, { recursive: true, force: true });
+  }
+
+  console.log('== 11. 工作区绑定（融合 P0）：本机密钥 + mock 论坛五路由 ==');
+  const wb = require('../lib/workspaceBinding');
+  // 11a. 密钥生成 + key_id 推导 + 签/验 roundtrip（纯本机，不联网）。
+  {
+    const tmpWb = fs.mkdtempSync(path.join(os.tmpdir(), 'chimera-wsbind-'));
+    try {
+      const first = wb.ensureKeyPair({ dir: tmpWb });
+      assert.strictEqual(first.created, true, '首次应新建密钥对');
+      assert.ok(/^ed25519-[0-9a-f]{64}$/.test(first.keyId), 'keyId 应为 ed25519- + 64 hex');
+      assert.strictEqual(first.fingerprint, first.keyId.slice(8, 16), '指纹应为 keyId 去前缀前 8 位');
+      assert.strictEqual(first.nodeId, 'ws-' + first.keyId.slice(8, 20), 'nodeId 应为 ws- + 去前缀前 12 hex');
+      const privStat = fs.statSync(path.join(tmpWb, 'workspace-key.pem'));
+      assert.strictEqual(privStat.mode & 0o777, 0o600, '私钥文件应为 0600');
+      assert.ok(fs.readFileSync(path.join(tmpWb, 'workspace-key.pem'), 'utf8').includes('BEGIN PRIVATE KEY'), '私钥应为 PKCS8 PEM');
+      const pubB64 = fs.readFileSync(path.join(tmpWb, 'workspace-key.pub'), 'utf8').trim();
+      assert.strictEqual(Buffer.from(pubB64, 'base64').length, 32, '公钥文件应为 base64 原始 32 字节');
+      assert.strictEqual(pubB64, first.publicKey, '公钥文件内容应与返回一致');
+      assert.strictEqual(wb.keyIdForPublicKey(Buffer.from(pubB64, 'base64')), first.keyId, 'keyId 应由公钥 sha256 推导');
+      const second = wb.ensureKeyPair({ dir: tmpWb });
+      assert.strictEqual(second.created, false, '再次调用不应轮换');
+      assert.strictEqual(second.keyId, first.keyId, '再次调用应读回同一 keyId');
+      const challenge = 'wsbind:test-challenge';
+      const sig = wb.signChallenge(challenge, wb.readPrivateKeyPem({ dir: tmpWb }));
+      assert.ok(wb.verifySignature({ challenge, publicKey: first.publicKey, signature: sig }), '正确挑战的签名应验过');
+      assert.strictEqual(wb.verifySignature({ challenge: 'wsbind:other', publicKey: first.publicKey, signature: sig }), false, '换挑战串验签应失败');
+      assert.strictEqual(wb.verifySignature({ challenge, publicKey: first.publicKey, signature: Buffer.from('00'.repeat(64), 'hex').toString('base64') }), false, '篡改签名验签应失败');
+      assert.strictEqual(wb.isOnline(new Date().toISOString()), true, '刚 seen 应为在线');
+      assert.strictEqual(wb.isOnline(new Date(Date.now() - 14 * 60 * 1000).toISOString()), true, '14 分钟前 seen 应为在线');
+      assert.strictEqual(wb.isOnline(new Date(Date.now() - 16 * 60 * 1000).toISOString()), false, '16 分钟前 seen 应为离线');
+      assert.strictEqual(wb.isOnline(null), false, '无 lastSeen 应为离线');
+      assert.strictEqual(wb.sanitizeDeviceName('a'.repeat(100)), 'a'.repeat(64), '设备名应截到 64 字符');
+      assert.strictEqual(wb.sanitizeDeviceName('a\x00b'), 'ab', '设备名应去控制字符');
+      ok('本机密钥：生成 0600 + keyId 推导 + 签/验 roundtrip + 在线 15 分钟口径');
+    } finally {
+      fs.rmSync(tmpWb, { recursive: true, force: true });
+    }
+  }
+  // 11b. mock 论坛五路由与状态机：challenge/bind/list/unlink/seen 全分支。
+  {
+    const forum2 = await startMockForum();
+    const tmpWb2 = fs.mkdtempSync(path.join(os.tmpdir(), 'chimera-wsbind2-'));
+    try {
+      const mc = new ForumClient(forum2.url);
+      const kp = wb.ensureKeyPair({ dir: tmpWb2 });
+      const pem = wb.readPrivateKeyPem({ dir: tmpWb2 });
+      const bindAs = async (token, deviceName, challengeOverride = null) => {
+        const ch = challengeOverride || (await mc.workspaceChallenge(token)).challenge;
+        const sig = wb.signChallenge(ch, pem);
+        return mc.registerWorkspaceBinding(token, { keyId: kp.keyId, publicKey: kp.publicKey, deviceName, challenge: ch, signature: sig });
+      };
+      // 无 token 取 challenge 回 401。
+      await assert.rejects(
+        withTimeout(mc.workspaceChallenge(null), 15000, 'POST /api/workspace-bindings/challenge 无 token'),
+        (e) => e.status === 401,
+      );
+      ok('工作区 challenge：无 token 回 401');
+      // 正常绑定：registryStatus=pending，行字段齐全。
+      const bound = await withTimeout(bindAs('test-token', 'test-device'), 15000, 'POST /api/workspace-bindings');
+      assert.strictEqual(bound.ok, true, '绑定应回 ok');
+      assert.strictEqual(bound.binding.keyId, kp.keyId, '绑定行 keyId 应与本机一致');
+      assert.strictEqual(bound.binding.deviceName, 'test-device', '绑定行设备名应与请求一致');
+      assert.strictEqual(bound.binding.registryStatus, 'pending', '新绑定 registryStatus 应为 pending');
+      assert.strictEqual(bound.binding.unlinkedTs, null, '新绑定 unlinkedTs 应为空');
+      const bindingId = bound.binding.id;
+      ok(`工作区绑定：正常注册回 pending，id=${bindingId}`);
+      // challenge 一次性：同一挑战重放回 400。
+      const chReplay = (await mc.workspaceChallenge('test-token')).challenge;
+      await withTimeout(bindAs('test-token', 'test-device', chReplay), 15000, 'POST /api/workspace-bindings 首用');
+      await assert.rejects(
+        withTimeout(bindAs('test-token', 'test-device', chReplay), 15000, 'POST /api/workspace-bindings 重放'),
+        (e) => e.status === 400,
+      );
+      ok('工作区 challenge：一次性，重放回 400');
+      // 签名错回 401（新挑战、签错串）。
+      {
+        const ch = (await mc.workspaceChallenge('test-token')).challenge;
+        const badSig = wb.signChallenge('wsbind:wrong-challenge', pem);
+        await assert.rejects(
+          withTimeout(mc.registerWorkspaceBinding('test-token', { keyId: kp.keyId, publicKey: kp.publicKey, deviceName: 'test-device', challenge: ch, signature: badSig }), 15000, 'POST /api/workspace-bindings 签名错'),
+          (e) => e.status === 401,
+        );
+      }
+      ok('工作区绑定：签名错回 401');
+      // keyId 与公钥不符回 400（新挑战、签名正确、keyId 换错）。
+      {
+        const ch = (await mc.workspaceChallenge('test-token')).challenge;
+        const sig = wb.signChallenge(ch, pem);
+        await assert.rejects(
+          withTimeout(mc.registerWorkspaceBinding('test-token', { keyId: 'ed25519-' + '00'.repeat(32), publicKey: kp.publicKey, deviceName: 'test-device', challenge: ch, signature: sig }), 15000, 'POST /api/workspace-bindings keyId 不符'),
+          (e) => e.status === 400,
+        );
+      }
+      ok('工作区绑定：keyId 与公钥不符回 400');
+      // 他人 keyId 回 409（otherhuman 用同一 keyId 绑）。
+      await assert.rejects(
+        withTimeout(bindAs('test-other-token', 'other-device'), 15000, 'POST /api/workspace-bindings 他人 keyId'),
+        (e) => e.status === 409,
+      );
+      ok('工作区绑定：他人 keyId 回 409');
+      // 同账号幂等：同一 keyId 再绑回原行 id，deviceName 更新。
+      const again = await withTimeout(bindAs('test-token', 'test-device-renamed'), 15000, 'POST /api/workspace-bindings 幂等');
+      assert.strictEqual(again.binding.id, bindingId, '同账号重绑应回原行 id');
+      assert.strictEqual(again.binding.deviceName, 'test-device-renamed', '幂等重绑应更新 deviceName');
+      ok('工作区绑定：同账号幂等，回原行 id 并更新设备名');
+      // list：本人 1 行活跃；seen 更新 lastSeenTs。
+      const mine = await withTimeout(mc.myWorkspaceBindings('test-token'), 15000, 'GET /api/workspace-bindings/me');
+      assert.strictEqual(mine.bindings.length, 1, '本人应有 1 行绑定');
+      assert.strictEqual(mine.bindings[0].id, bindingId, '列表行 id 应与注册一致');
+      const beforeSeen = Date.parse(mine.bindings[0].lastSeenTs);
+      const seen = await withTimeout(mc.workspaceSeen('test-token', bindingId), 15000, 'POST /api/workspace-bindings/:id/seen');
+      assert.ok(Date.parse(seen.lastSeenTs) >= beforeSeen, 'seen 应更新 lastSeenTs');
+      ok('工作区列表/seen：本人 1 行，seen 更新 lastSeenTs');
+      // 公开面：testhuman 有绑且在线，otherhuman 无绑；不泄 keyId/deviceName/publicKey。
+      const pub = await withTimeout(mc.getAccounts(), 15000, 'GET /api/accounts 工作区公开面');
+      const meAcc = (pub.accounts || []).find((a) => a.name === 'testhuman');
+      const otherAcc = (pub.accounts || []).find((a) => a.name === 'otherhuman');
+      assert.strictEqual(meAcc.hasWorkspace, true, '已绑账号 hasWorkspace 应为真');
+      assert.strictEqual(meAcc.workspaceOnline, true, '刚 seen 账号 workspaceOnline 应为真');
+      assert.strictEqual(otherAcc.hasWorkspace, false, '未绑账号 hasWorkspace 应为假');
+      assert.strictEqual(otherAcc.workspaceOnline, false, '未绑账号 workspaceOnline 应为假');
+      for (const a of pub.accounts) {
+        assert.ok(!('keyId' in a) && !('deviceName' in a) && !('publicKey' in a), '公开面不应泄 keyId/deviceName/publicKey');
+      }
+      ok('工作区公开面：只多 hasWorkspace/workspaceOnline 两个布尔值，无凭证泄漏');
+      // 解绑：unlinkedTs 已打、registryStatus=revoked-pending；再解 409；解绑后 seen 409。
+      const unlinked = await withTimeout(mc.unlinkWorkspaceBinding('test-token', bindingId), 15000, 'POST /api/workspace-bindings/:id/unlink');
+      assert.ok(unlinked.binding.unlinkedTs, '解绑应打 unlinkedTs');
+      assert.strictEqual(unlinked.binding.registryStatus, 'revoked-pending', '解绑后 registryStatus 应为 revoked-pending（DO 吊销待 Owner）');
+      await assert.rejects(
+        withTimeout(mc.unlinkWorkspaceBinding('test-token', bindingId), 15000, 'POST /api/workspace-bindings/:id/unlink 再解'),
+        (e) => e.status === 409,
+      );
+      await assert.rejects(
+        withTimeout(mc.workspaceSeen('test-token', bindingId), 15000, 'POST /api/workspace-bindings/:id/seen 已解绑'),
+        (e) => e.status === 409,
+      );
+      const mineAfter = await withTimeout(mc.myWorkspaceBindings('test-token'), 15000, 'GET /api/workspace-bindings/me 解绑后');
+      assert.strictEqual(mineAfter.bindings.length, 1, '解绑后列表仍保留该行');
+      assert.ok(mineAfter.bindings[0].unlinkedTs, '解绑后列表行应带 unlinkedTs');
+      const pubAfter = await withTimeout(mc.getAccounts(), 15000, 'GET /api/accounts 解绑后');
+      assert.strictEqual((pubAfter.accounts || []).find((a) => a.name === 'testhuman').hasWorkspace, false, '解绑后 hasWorkspace 应为假');
+      ok('工作区解绑：registryStatus=revoked-pending，再解 409，解绑后 seen 409，公开面回落');
+    } finally {
+      forum2.close();
+      fs.rmSync(tmpWb2, { recursive: true, force: true });
+    }
+  }
+  // 11c. 渲染器纯函数：指纹前 8 位 + 在线 15 分钟口径（抽 renderer.js 实际函数跑）。
+  {
+    const rendererSrc = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'renderer.js'), 'utf8');
+    const extractFn = (name) => {
+      const m = rendererSrc.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n\\}`));
+      assert.ok(m, `renderer.js 应包含 ${name}`);
+      return m[0];
+    };
+    const fpFn = new Function(`${extractFn('workspaceFingerprint')}; return workspaceFingerprint;`)();
+    const onlineFn = new Function(`${extractFn('isWorkspaceOnline')}; return isWorkspaceOnline;`)();
+    assert.strictEqual(fpFn('ed25519-aa99f1297f02abcdef'), 'aa99f129', '指纹应为去前缀前 8 位');
+    assert.strictEqual(fpFn(''), '', '空 keyId 指纹应为空');
+    const now = Date.now();
+    assert.strictEqual(onlineFn(new Date(now - 60 * 1000).toISOString(), now), true, '1 分钟前应在线');
+    assert.strictEqual(onlineFn(new Date(now - 16 * 60 * 1000).toISOString(), now), false, '16 分钟前应离线');
+    assert.strictEqual(onlineFn(null, now), false, '无 lastSeen 应离线');
+    assert.strictEqual(onlineFn('not-a-date', now), false, '非法时间应离线');
+    ok('渲染器纯函数：workspaceFingerprint 前 8 位 + isWorkspaceOnline 15 分钟口径');
   }
 
   console.log('== 4. live WS（内核 v2，匿名，不写线上状态）==');

@@ -105,6 +105,19 @@ function filterPostsByBoard(posts, board) {
   if (!board) return posts || [];
   return (posts || []).filter((p) => p.board === board);
 }
+
+// 工作区绑定（融合 P0，纯函数，Node 可测）：指纹 = keyId 去掉 'ed25519-'
+// 前缀后的前 8 个 hex 字符；在线 = lastSeenTs 在 15 分钟内。
+function workspaceFingerprint(keyId) {
+  return String(keyId || '').replace(/^ed25519-/, '').slice(0, 8);
+}
+function isWorkspaceOnline(lastSeenTs, nowMs) {
+  if (!lastSeenTs) return false;
+  const t = Date.parse(lastSeenTs);
+  if (!Number.isFinite(t)) return false;
+  const now = nowMs || Date.now();
+  return now - t >= 0 && now - t <= 15 * 60 * 1000;
+}
 function setMeChip() {
   const av = $('whoamiAvatar'); const chip = $('whoami');
   if (!av || !chip) return;
@@ -1504,10 +1517,54 @@ async function refreshNodePanel() {
       actText.textContent = '还没绑定论坛身份，节点只能本地跑，不上传。点“激活节点”，用当前登录的人类账号自动分配一个节点账号（归你所有），token 只存本机。';
       actBtn.classList.remove('hidden');
     }
+    // 工作区绑定（融合 P0）：状态另行拉取，失败不影响节点面板其余内容。
+    refreshWorkspaceBinding().catch(() => {});
   } catch (err) {
     $('nodeStateText').textContent = '节点状态读取失败：' + (err.message || err);
   }
 }
+
+// 工作区绑定（融合 P0）：无绑定显示“绑定工作区”按钮；有绑定显示
+// deviceName、指纹前 8 位、在线/离线（lastSeen 15 分钟内为在线）。
+// P0 不做改名 UI、不做解绑按钮。绑定后每 5 分钟 seen 由主进程定时调。
+async function refreshWorkspaceBinding() {
+  const btn = $('workspaceBindBtn');
+  const text = $('workspaceBindText');
+  if (!btn || !text) return;
+  try {
+    const data = await window.chimera.api.workspaceBindings();
+    const bindings = (data && data.bindings) || [];
+    const active = bindings.find((b) => !b.unlinkedTs);
+    if (!active) {
+      state.workspaceBinding = null;
+      text.textContent = '工作区未绑定：绑定后论坛能看到这台工作区是否在线，私钥只存本机。';
+      btn.classList.remove('hidden');
+      return;
+    }
+    state.workspaceBinding = active;
+    const online = isWorkspaceOnline(active.lastSeenTs);
+    text.textContent = '工作区已绑定：' + (active.deviceName || '') + ' · 指纹 ' + workspaceFingerprint(active.keyId) + ' · ' + (online ? '在线' : '离线') + (active.lastSeenTs ? ' · 最近活跃 ' + fmtTime(active.lastSeenTs) : '');
+    btn.classList.add('hidden');
+  } catch (err) {
+    text.textContent = '工作区绑定状态读取失败：' + (err.message || err);
+    btn.classList.add('hidden');
+  }
+}
+
+// 绑定工作区（融合 P0）：challenge → 主进程本机签名 → 注册 → 显示绑定状态。
+$('workspaceBindBtn').addEventListener('click', async () => {
+  const btn = $('workspaceBindBtn');
+  btn.disabled = true;
+  try {
+    const ch = await window.chimera.api.workspaceChallenge();
+    if (!ch || !ch.challenge) throw new Error('服务端未返回挑战串');
+    const data = await window.chimera.api.workspaceBind(ch.challenge);
+    await refreshWorkspaceBinding();
+    const name = data && data.binding && data.binding.deviceName;
+    if (name) alert('工作区已绑定：' + name);
+  } catch (err) { alert('绑定失败：' + (err.message || err)); }
+  finally { btn.disabled = false; }
+});
 
 $('nodeToggle').addEventListener('change', async (e) => {
   const want = e.target.checked;

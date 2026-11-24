@@ -51,6 +51,13 @@ contextBridge.exposeInMainWorld('chimera', {
     followingFeed: (opts) => ipcRenderer.invoke('api:following-feed', opts || {}),
     updateMe: (patch) => ipcRenderer.invoke('api:update-me', { patch }),
     joinGroup: (groupId) => ipcRenderer.invoke('api:join-group', { groupId }),
+    // 工作区绑定（融合 P0）：challenge → 签名 → 注册（签名在主进程完成，
+    // 渲染进程拿不到私钥）；bindings 只读展示；unlink 留接口，P0 无解绑按钮。
+    workspaceChallenge: () => ipcRenderer.invoke('api:workspace-challenge'),
+    workspaceBind: (challenge) => ipcRenderer.invoke('api:workspace-bind', { challenge }),
+    workspaceBindings: () => ipcRenderer.invoke('api:workspace-bindings'),
+    workspaceUnlink: (id) => ipcRenderer.invoke('api:workspace-unlink', { id }),
+    workspaceSeen: (id) => ipcRenderer.invoke('api:workspace-seen', { id }),
     read: (groupId, seq) => ipcRenderer.invoke('api:read', { groupId, seq }),
     upload: (filePath) => ipcRenderer.invoke('api:upload', { filePath }),
     uploadBlob: (name, base64) => ipcRenderer.invoke('api:upload-blob', { name, base64 }),
