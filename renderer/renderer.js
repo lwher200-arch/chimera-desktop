@@ -900,32 +900,37 @@ function renderProfile(acc, follow) {
     box.innerHTML = `<div class="profile-head"><h2>${esc(name)}</h2><button class="btn ghost" data-action="close-profile">✕</button></div><p class="muted small">找不到该账号（可能已退役或列表未同步）</p>`;
     return;
   }
-  const st = acc.stats || {};
+  const st = acc.stats || null;
   const chips = (arr) => (arr || []).map((x) => `<span class="tag-chip">${esc(String(x))}</span>`).join('');
   const links = (acc.links || []).map((l) => `<a href="${esc(String(l))}" target="_blank" rel="noreferrer">${esc(String(l))}</a>`).join(' ');
   const followers = (follow && follow.followers) || [];
   const following = (follow && follow.following) || [];
   const followedByMe = !!(follow && follow.followedByMe);
-  const followersCount = follow ? follow.followersCount : followers.length;
-  const followingCount = follow ? follow.followingCount : following.length;
+  // 关注数优先用 /api/follow 回包；拉不到时用账号本身带的计数（服务端 /api/accounts 自带）。
+  const followersCount = follow ? follow.followersCount : (acc.followersCount ?? followers.length);
+  const followingCount = follow ? follow.followingCount : (acc.followingCount ?? following.length);
   const nameChips = (list) => list.map((f) => `<button class="linklike" data-profile="${esc(f.name)}">${esc(f.name)}</button>`).join('、') || '<span class="muted small">无</span>';
   const avEmoji = acc.avatarEmoji || avatarInitial(acc.name);
   const avStyle = acc.avatarColor ? ` style="background:${esc(acc.avatarColor)}"` : '';
   const avClass = acc.avatarColor ? '' : ' ' + avatarClass(acc.name);
+  const avatar = acc.avatarUrl
+    ? `<img class="avatar avatar-lg" src="${esc(acc.avatarUrl)}" alt="">`
+    : `<span class="avatar avatar-lg${avClass}"${avStyle}>${esc(avEmoji)}</span>`;
   box.innerHTML = `
     <div class="profile-head">
-      <span class="avatar avatar-lg${avClass}"${avStyle}>${esc(avEmoji)}</span>
+      ${avatar}
       <div><h2>${esc(acc.name)}</h2>
-      <div class="muted small">${acc.type === 'human' ? '人类' : acc.type === 'ai' ? 'AI' : '节点'} · ${esc(acc.role || 'member')} · ${esc(acc.level || '')} · ${acc.points ?? 0} 分${acc.status && acc.status !== 'active' ? ' · 已' + esc(acc.status) : ''}</div></div>
+      <div class="muted small">${acc.type === 'human' ? '人类' : acc.type === 'ai' ? 'AI' : '节点'} · ${esc(acc.role || 'member')} · ${esc(acc.level || '')} · ${acc.points ?? 0} 分${acc.status && acc.status !== 'active' ? ' · 已' + esc(acc.status) : ''}${acc.lastActiveTs ? ' · 最近活跃 ' + esc(fmtTime(acc.lastActiveTs)) : ''}</div></div>
       <button class="btn ghost" data-action="close-profile">✕</button>
     </div>
     ${acc.bio ? `<p>${esc(acc.bio)}</p>` : ''}
     ${acc.signature ? `<p class="muted small">“${esc(acc.signature)}”</p>` : ''}
     ${acc.tags && acc.tags.length ? `<div class="profile-row">${chips(acc.tags)}</div>` : ''}
+    ${acc.badges && acc.badges.length ? `<div class="profile-row">${chips(acc.badges)}</div>` : ''}
     ${acc.strengths && acc.strengths.length ? `<div class="profile-row"><b class="small">擅长：</b>${chips(acc.strengths)}</div>` : ''}
     ${acc.weaknesses && acc.weaknesses.length ? `<div class="profile-row"><b class="small">短板：</b>${chips(acc.weaknesses)}</div>` : ''}
     ${links ? `<div class="profile-row small">${links}</div>` : ''}
-    <div class="profile-stats muted small">帖子 ${st.posts ?? 0} · 回复 ${st.replies ?? 0} · 消息 ${st.messages ?? 0} · 获赞 ${st.likesReceived ?? 0}</div>
+    ${st ? `<div class="profile-stats muted small">帖子 ${st.posts ?? 0} · 回复 ${st.replies ?? 0} · 消息 ${st.messages ?? 0} · 获赞 ${st.likesReceived ?? 0}</div>` : ''}
     <div class="profile-row small"><b>关注 ${followingCount}</b> ${nameChips(following)}</div>
     <div class="profile-row small"><b>粉丝 ${followersCount}</b> ${nameChips(followers)}</div>
     <div class="form-row">
