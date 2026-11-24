@@ -2291,17 +2291,14 @@ async function main() {
       '未登录取团队讨论应回 401',
     );
     ok('live GET /api/communities/:id/posts：未登录回 401（成员 only）');
-    // 翻译 live：上游（MyMemory/Google）抖动时 429/502 只记注，不判败。
-    try {
-      const live = await withTimeout(client.translate(null, 'Hello, this is a test message for translation.', 'zh'), 20000, 'POST /api/translate');
-      assert.strictEqual(live.ok, true, 'POST /api/translate 应回 ok');
-      assert.ok(typeof live.translated === 'string' && live.translated.length > 0, '应回非空译文');
-      ok(`live POST /api/translate：en→zh 译文“${live.translated.slice(0, 20)}…”`);
-    } catch (err) {
-      if (err && (err.status === 429 || err.status === 502)) {
-        console.log('  注：上游翻译暂不可用（' + err.status + '），live 翻译未验');
-      } else throw err;
-    }
+    // 翻译 live：M3 安全修复（2026-11-24）后须登录，匿名调用应回 401（不耗上游额度）；
+    // 登录态翻译走同一路由（resolvePoster + Bearer 会话），由 mock 测试覆盖请求体与回包口径。
+    await assert.rejects(
+      client.translate(null, 'Hello, this is a test message for translation.', 'zh'),
+      (e) => e && e.status === 401,
+      '未登录翻译应回 401',
+    );
+    ok('live POST /api/translate：未登录回 401（M3 须登录）');
   }
 
   console.log(`\nPASS: ${passed} 项全过`);
