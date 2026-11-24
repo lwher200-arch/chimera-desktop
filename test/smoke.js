@@ -3082,6 +3082,84 @@ async function main() {
     ok('renderer.js 接线：名字打标、搜索与公告正文可换显、切换后刷队列');
   }
 
+  console.log('== 14. “全部板块”标签跟随语言（v0.3.9）==');
+  // 14a. 字典：中英都有值（根因不在字典缺 key：字典早有 side.allBoards）。
+  {
+    assert.strictEqual(tr.ui('side.allBoards'), '全部板块', '字典中文应为“全部板块”');
+    assert.strictEqual(tr.ui('side.allBoards', 'en'), 'All boards', '字典英文应为 All boards');
+    ok('字典：side.allBoards 中英齐全');
+  }
+  // 14b. 接线：syncChrome 应重画板块列表。根因：板块列表只在 loadBoards/点版块时
+  // 重画，语言切换的 syncChrome 只重画了会话列表与右侧栏；真实版块名靠
+  // data-tr-name 名字队列翻，唯独“全部板块”这项 chrome 没人重画。
+  {
+    const rendererSrc = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'renderer.js'), 'utf8');
+    const start = rendererSrc.indexOf('function syncChrome()');
+    assert.ok(start >= 0, 'renderer.js 应包含 syncChrome');
+    const end = rendererSrc.indexOf('\n}\n', start);
+    assert.ok(end > start, '应能取到 syncChrome 函数体');
+    const syncChromeSrc = rendererSrc.slice(start, end);
+    assert.ok(syncChromeSrc.includes('renderBoardList();'), 'syncChrome 应调用 renderBoardList 重画板块列表');
+    assert.ok(syncChromeSrc.includes('renderConvList();'), 'syncChrome 应仍重画会话列表');
+    ok('接线：syncChrome 重画板块列表');
+  }
+  // 14c. 功能：真实 renderBoardList 在假 DOM 上，中英各画一次，首项应跟语言走。
+  {
+    globalThis.localStorage = {
+      _s: {},
+      getItem(k) { return this._s[k] === undefined ? null : this._s[k]; },
+      setItem(k, v) { this._s[k] = String(v); },
+    };
+    tr._resetForTest();
+    const rendererSrc = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'renderer.js'), 'utf8');
+    const extractFn = (name) => {
+      const m = rendererSrc.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n\\}`));
+      assert.ok(m, `renderer.js 应包含 ${name}`);
+      return m[0];
+    };
+    const uiFn = new Function(`${extractFn('ui')}; return ui;`)();
+    const escFn = new Function(`${extractFn('esc')}; return esc;`)();
+    const renderBoardListFn = new Function(`${extractFn('renderBoardList')}; return renderBoardList;`)();
+    const boardEl = {
+      _html: '',
+      set innerHTML(v) { this._html = v; },
+      get innerHTML() { return this._html; },
+      querySelectorAll() { return []; },
+    };
+    const fakeDoc = {
+      getElementById: (id) => (id === 'boardList' ? boardEl : null),
+      querySelectorAll: () => [],
+    };
+    globalThis.window = { ChimeraTranslate: tr };
+    globalThis.document = fakeDoc;
+    globalThis.$ = (id) => fakeDoc.getElementById(id);
+    globalThis.state = { boards: [{ id: 'b1', name: '技术探讨' }, { id: 'b2', name: '经验分享' }], postsBoard: null };
+    globalThis.ui = uiFn;
+    globalThis.esc = escFn;
+    try {
+      tr.setViewerLang('zh');
+      renderBoardListFn();
+      assert.ok(boardEl.innerHTML.includes('全部板块'), '中文下首项应为“全部板块”');
+      assert.ok(!boardEl.innerHTML.includes('All boards'), '中文下首项不应是英文');
+      assert.ok(boardEl.innerHTML.includes('技术探讨'), '中文下真实版块名应原样在');
+      tr.setViewerLang('en');
+      renderBoardListFn();
+      assert.ok(boardEl.innerHTML.includes('All boards'), '英文下首项应为 All boards');
+      assert.ok(!boardEl.innerHTML.includes('全部板块'), '英文下首项不应残留中文');
+      assert.ok(boardEl.innerHTML.includes('data-tr-name="技术探讨"'), '真实版块名仍应带 data-tr-name 走名字队列');
+      ok('renderBoardList：中英各画一次，首项跟语言走，真实版块名仍走名字队列');
+    } finally {
+      delete globalThis.window;
+      delete globalThis.document;
+      delete globalThis.$;
+      delete globalThis.state;
+      delete globalThis.ui;
+      delete globalThis.esc;
+      delete globalThis.localStorage;
+      tr._resetForTest();
+    }
+  }
+
   console.log(`\nPASS: ${passed} 项全过`);
 }
 

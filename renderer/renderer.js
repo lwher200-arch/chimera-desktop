@@ -1747,6 +1747,9 @@ function syncChrome() {
     refreshNodePanel();
   }
   renderConvList();
+  renderBoardList(); // v0.3.9：“全部板块”是 chrome（字典 side.allBoards），
+  // 但板块列表只在 loadBoards/点版块时重画，syncChrome 没它，语言切换后
+  // 仍留启动时的语言；真实版块名靠 data-tr-name 名字队列翻，唯独它漏网。
   renderRightbar();
   syncOlderButton();
 }
