@@ -71,6 +71,7 @@ function startMockForum() {
     workspaceChallenges: {}, // challenge -> {accountName, expiresAt, used}
     workspaceBindingSeq: 0,
     failNextUpload: 0, // >0 时下几次上传回 500（重试测试用）
+    dropNextUploadAck: 0, // >0 时下几次上传存下后不回 ack（丢 ack 测试用，R1/R2）
     // mock 团队：创建人 testhuman，成员 testai；otherhuman/stranger 初始非成员。
     communities: [{
       id: 'com-mock', name: 'mockteam', title: 'Mock 团队', description: 'mock 团队简介',
@@ -186,6 +187,11 @@ function startMockForum() {
         state.node.lastHash = headers[headers.length - 1].hash;
         state.node.received += headers.length;
         state.uploads.push(headers);
+        if (state.dropNextUploadAck > 0) {
+          state.dropNextUploadAck -= 1;
+          res.destroy(); // 服务端已存下、ack 在半路丢了（R1/R2 的丢 ack 情形）
+          return;
+        }
         res.end(JSON.stringify({ ok: true, accepted: headers.length, lastSeq: state.node.lastSeq, lastHash: state.node.lastHash, node: 'node:testnode' }));
         return;
       }
@@ -716,8 +722,12 @@ async function main() {
   const forumUrl = forum.url;
   const tmp3b = fs.mkdtempSync(path.join(os.tmpdir(), 'chimera-node-upload-'));
   try {
-    // token 文件（0600）：节点身份
-    const tokenFile = path.join(tmp3b, 'node-token');
+    // token 文件（0600）：节点身份。v0.3.10 (d)：token 必须放在 nodeDir 内
+    //（NodeManager 构造即校验，放在外面直接抛——测试 profile 绝不能读
+    // live token 的同一道防线）。
+    const nodeDir3b = path.join(tmp3b, 'node');
+    fs.mkdirSync(nodeDir3b, { recursive: true });
+    const tokenFile = path.join(nodeDir3b, 'forum-token');
     fs.writeFileSync(tokenFile, 'test-node-token\n');
     fs.chmodSync(tokenFile, 0o600);
 
@@ -790,10 +800,14 @@ async function main() {
 
     // (d) 409 → 重基：本地链换成与服务端不衔接的 seq 4 头
     const nm4dir = path.join(tmp3b, 'node4');
+    fs.mkdirSync(nm4dir, { recursive: true });
+    const tokenFile4 = path.join(nm4dir, 'forum-token');
+    fs.writeFileSync(tokenFile4, 'test-node-token\n');
+    fs.chmodSync(tokenFile4, 0o600);
     const nm4 = new NodeManager({
       nodeDir: nm4dir,
       apiBase: forumUrl,
-      config: { enabled: false, port: 0, seeds: [forumUrl], forumTokenFile: tokenFile },
+      config: { enabled: false, port: 0, seeds: [forumUrl], forumTokenFile: tokenFile4 },
       onLog: () => {},
     });
     await nm4.start();
@@ -807,7 +821,7 @@ async function main() {
     const nm5 = new NodeManager({
       nodeDir: nm4dir,
       apiBase: forumUrl,
-      config: { enabled: false, port: 0, seeds: [forumUrl], forumTokenFile: tokenFile },
+      config: { enabled: false, port: 0, seeds: [forumUrl], forumTokenFile: tokenFile4 },
       onLog: () => {},
     });
     await nm5.start(); // 自检：单行链自洽，通过；首次同步追加 seq 5，上传 seq 4-5 → 409 → 重基
@@ -1211,6 +1225,99 @@ async function main() {
   } finally {
     forum.close();
     fs.rmSync(tmp3b, { recursive: true, force: true });
+  }
+
+  console.log('== 3c. 节点上传：丢 ack 与 409 分流（v0.3.10）==');
+  const forum3c = await startMockForum();
+  const forum3cUrl = forum3c.url;
+  const tmp3c = fs.mkdtempSync(path.join(os.tmpdir(), 'chimera-node-ack-'));
+  try {
+    const nodeDir6 = path.join(tmp3c, 'node');
+    fs.mkdirSync(nodeDir6, { recursive: true });
+    const tokenFile6 = path.join(nodeDir6, 'forum-token');
+    fs.writeFileSync(tokenFile6, 'test-node-token\n');
+    fs.chmodSync(tokenFile6, 0o600);
+    let rebased = 0;
+    const nm6 = new NodeManager({
+      nodeDir: nodeDir6,
+      apiBase: forum3cUrl,
+      config: { enabled: false, port: 0, seeds: [forum3cUrl], forumTokenFile: tokenFile6 },
+      onLog: () => {},
+    });
+    nm6.on('chain-rebased', () => { rebased += 1; });
+    await nm6.start(); // seq 1 创世上传
+    assert.strictEqual(nm6.lastUploadedSeq, 1, '起步应上传 seq 1');
+    await nm6.syncOnce(); // seq 2
+    assert.strictEqual(nm6.lastUploadedSeq, 2, '应上传 seq 2');
+
+    // (i) 丢 ack（传输出错）：服务端已存下 seq 3、ack 在半路丢了 → 认领，不重基
+    forum3c.state.dropNextUploadAck = 1;
+    await nm6.syncOnce(); // 追加 seq 3，POST 存下后 ack 丢 → reconcile 认领
+    assert.strictEqual(nm6.lastUploadedSeq, 3, '丢 ack 后应认领服务端 lastSeq=3');
+    assert.strictEqual(forum3c.state.node.lastSeq, 3, '服务端应已存下 seq 3');
+    assert.strictEqual(nm6.uploadFailures, 0, '认领后失败数应清零，不退避');
+    assert.strictEqual(nm6._lastRebaseAt, 0, '丢 ack 绝不能触发重基');
+    assert.strictEqual(rebased, 0, '丢 ack 不应发 chain-rebased 事件');
+    ok('丢 ack：服务端存下、ack 丢失后认领服务端头继续，不重发、不重基');
+    await nm6.syncOnce(); // seq 4 正常上传，证明认领后链继续走
+    assert.strictEqual(nm6.lastUploadedSeq, 4, '认领后下一条 seq 4 应正常上传');
+    assert.strictEqual(rebased, 0, '认领后续传仍不应重基');
+    ok('丢 ack 后续传：seq 4 正常上传，链未断');
+
+    // (j) 409 服务端多 1（重试撞 409）：游标倒回假装 ack 丢了，服务端已超前 → 认领，不重基
+    nm6.lastUploadedSeq = 2; // 白盒：假装 seq 3、4 的 ack 都丢了
+    nm6._nextUploadAt = 0;
+    nm6._saveUploadState();
+    await nm6.syncOnce(); // 追加 seq 5，上传 3..5 → 409（expectedSeq=5）→ 认领至 4
+    assert.strictEqual(nm6.lastUploadedSeq, 4, '409 后应认领服务端 lastSeq=4');
+    assert.strictEqual(nm6._lastRebaseAt, 0, '409 丢 ack 情形绝不能重基');
+    assert.strictEqual(rebased, 0, '409 认领不应发 chain-rebased 事件');
+    ok('409 丢 ack：服务端多 1 时认领服务端头，不重基');
+    await nm6.syncOnce(); // 追加 seq 6，上传 5..6 → 服务端 6
+    assert.strictEqual(nm6.lastUploadedSeq, 6, '认领后剩余 seq 5、6 应补传成功');
+    assert.strictEqual(forum3c.state.node.lastSeq, 6, '服务端 lastSeq 应追到 6');
+    ok('409 认领后续传：剩余 seq 补传成功，服务端追到 6');
+
+    // (k) 409 服务端落后（真分叉）：本地链换成与服务端不衔接的 seq 9 头 → 仍走重基
+    const nm7dir = path.join(tmp3c, 'node7');
+    fs.mkdirSync(nm7dir, { recursive: true });
+    const tokenFile7 = path.join(nm7dir, 'forum-token');
+    fs.writeFileSync(tokenFile7, 'test-node-token\n');
+    fs.chmodSync(tokenFile7, 0o600);
+    const nm7 = new NodeManager({
+      nodeDir: nm7dir,
+      apiBase: forum3cUrl,
+      config: { enabled: false, port: 0, seeds: [forum3cUrl], forumTokenFile: tokenFile7 },
+      onLog: () => {},
+    });
+    await nm7.start(); // seq 1 创世上传（服务端重基接受，lastSeq=1）
+    await nm7.stop();
+    const forgedBody7 = { seq: 9, kind: 'community-head', ts: new Date().toISOString(), posts: 999, accounts: 30, groups: 10, messages: 9999, dms: 7, prevHash: 'c'.repeat(64) };
+    const forgedHash7 = crypto.createHash('sha256').update(JSON.stringify(forgedBody7, Object.keys(forgedBody7).sort()), 'utf8').digest('hex');
+    fs.writeFileSync(path.join(nm7dir, 'replica', 'headers.jsonl'), JSON.stringify({ ...forgedBody7, hash: forgedHash7 }) + '\n');
+    fs.writeFileSync(path.join(nm7dir, 'upload-state.json'), JSON.stringify({ lastUploadedSeq: 8, lastUploadAt: null, failures: 0, lastRebaseAt: 0 }, null, 2));
+    let rebased7 = 0;
+    const nm8 = new NodeManager({
+      nodeDir: nm7dir,
+      apiBase: forum3cUrl,
+      config: { enabled: false, port: 0, seeds: [forum3cUrl], forumTokenFile: tokenFile7 },
+      onLog: () => {},
+    });
+    nm8.on('chain-rebased', () => { rebased7 += 1; });
+    await nm8.start(); // 自检通过；首次同步追加 seq 10，上传 9..10 → 409（服务端 lastSeq=1 落后）→ 重基
+    assert.strictEqual(nm8.chainOk, true, '伪造单行链自洽，自检应通过');
+    assert.ok(nm8._lastRebaseAt > 0, '409 服务端落后时应触发本地重基');
+    assert.strictEqual(rebased7, 1, '真分叉应发一次 chain-rebased 事件');
+    assert.strictEqual(nm8.lastUploadedSeq, 0, '重基后游标应归零');
+    await nm8.syncOnce(); // 新链 seq 1 上传（服务端重基接受）
+    assert.strictEqual(nm8.lastUploadedSeq, 1, '重基后新链 seq 1 应上传成功');
+    assert.strictEqual(forum3c.state.node.lastSeq, 1, '服务端重基后 lastSeq 应为 1');
+    ok('409 真分叉：服务端落后时仍走重基，新链上传成功');
+    await nm8.stop();
+    await nm6.stop();
+  } finally {
+    forum3c.close();
+    fs.rmSync(tmp3c, { recursive: true, force: true });
   }
 
   console.log('== 11. 工作区绑定（融合 P0）：本机密钥 + mock 论坛五路由 ==');
@@ -3158,6 +3265,69 @@ async function main() {
       delete globalThis.localStorage;
       tr._resetForTest();
     }
+  }
+
+  console.log('== 15. 节点链重基根因修复（v0.3.10）==');
+  // 15a. 单实例锁（c）：main.js 应在 ready 前请求单实例锁；拿不到锁直接退出；
+  // 第二个实例应聚焦已有窗口。锁落在 userData 目录，走查应用用独立
+  // --user-data-dir 时各拿各的锁，不影响 CDP 走查。
+  {
+    const mainSrc = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+    assert.ok(mainSrc.includes('app.requestSingleInstanceLock()'), 'main.js 应调用 requestSingleInstanceLock');
+    const lockAt = mainSrc.indexOf('app.requestSingleInstanceLock()');
+    const readyAt = mainSrc.indexOf('app.whenReady()');
+    assert.ok(lockAt >= 0 && readyAt > lockAt, '单实例锁应在 app.whenReady() 之前请求');
+    assert.ok(mainSrc.includes("app.on('second-instance'"), '应监听 second-instance 聚焦已有窗口');
+    assert.ok(/if \(!gotSingleInstanceLock\) \{\s*app\.quit\(\);/.test(mainSrc), '拿不到锁时应直接退出');
+    ok('单实例锁：ready 前请求、拿不到即退出、second-instance 聚焦已有窗口');
+  }
+  // 15b. 测试 profile token 隔离 guard（d）：token 文件必须在 nodeDir 内，
+  // 否则构造即抛（大声失败）；放在 nodeDir 内应正常工作。
+  {
+    const tmp15 = fs.mkdtempSync(path.join(os.tmpdir(), 'chimera-node-guard-'));
+    try {
+      const liveToken = path.join(tmp15, 'live-forum-token');
+      fs.writeFileSync(liveToken, 'live-token\n');
+      assert.throws(
+        () => new NodeManager({
+          nodeDir: path.join(tmp15, 'testprofile', 'node'),
+          apiBase: 'http://127.0.0.1:9',
+          config: { enabled: false, port: 0, forumTokenFile: liveToken },
+          onLog: () => {},
+        }),
+        /不在节点数据目录内/,
+        '测试 profile 读 live token 文件时构造应直接抛错',
+      );
+      // token 在 nodeDir 内：应正常构造（且 _readForumToken 能读到）
+      const nodeDir15 = path.join(tmp15, 'testprofile', 'node');
+      fs.mkdirSync(nodeDir15, { recursive: true });
+      const ownToken = path.join(nodeDir15, 'forum-token');
+      fs.writeFileSync(ownToken, 'own-token\n');
+      const nm15 = new NodeManager({
+        nodeDir: nodeDir15,
+        apiBase: 'http://127.0.0.1:9',
+        config: { enabled: false, port: 0, forumTokenFile: ownToken },
+        onLog: () => {},
+      });
+      assert.strictEqual(nm15._readForumToken(), 'own-token', '自有 token 文件应能读到');
+      assert.strictEqual(nm15.status().hasForumIdentity, true, '自有 token 应认领身份');
+      ok('token 隔离 guard：跨目录 token 构造即抛，自有 token 正常工作');
+    } finally {
+      fs.rmSync(tmp15, { recursive: true, force: true });
+    }
+  }
+  // 15c. 主进程 token 路径派生（d）：initNode 应按当前 userData 派生 token
+  // 路径，绝不读 state.json 里存的老路径（R3：验收 profile 抄了 live
+  // state.json，空链 + live token 发 seq-1 创世清链）。
+  {
+    const mainSrc = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+    const initAt = mainSrc.indexOf('async function initNode()');
+    assert.ok(initAt >= 0, 'main.js 应包含 initNode');
+    const initEnd = mainSrc.indexOf('\n}\n', initAt);
+    const initSrc = mainSrc.slice(initAt, initEnd);
+    assert.ok(initSrc.includes("path.join(userDataFile('node'), 'forum-token')"), 'initNode 应按 userData 派生 token 路径');
+    assert.ok(!initSrc.includes('store.state.node.forumTokenFile'), 'initNode 不应再读 state.json 里存的 token 路径');
+    ok('主进程：token 路径按 userData 派生，不读存量路径');
   }
 
   console.log(`\nPASS: ${passed} 项全过`);

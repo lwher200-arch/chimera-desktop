@@ -181,7 +181,12 @@ async function initNode() {
       seeds: store.state.node.seeds && store.state.node.seeds.length
         ? store.state.node.seeds
         : [API_BASE],
-      forumTokenFile: store.state.node.forumTokenFile,
+      // v0.3.10 (d)：token 路径一律按当前 userData 派生，绝不读 state.json 里
+      // 存的老路径——R3 就是验收 profile 抄了 live state.json，空链 + live
+      // token 发 seq-1 创世把服务端链清了。测试 profile 的 userData 下没有
+      // token 文件，节点自然只本地跑、不上传；NodeManager 构造里还有一道
+      // 显性 guard（token 必须在 nodeDir 内，配错即抛）。
+      forumTokenFile: path.join(userDataFile('node'), 'forum-token'),
     },
     onLog: (line) => sendToRenderer('node:log', line),
   });
@@ -404,7 +409,20 @@ function registerIpc() {
   });
 }
 
-app.whenReady().then(async () => {
+// 单实例锁（v0.3.10，R3 根因）：第二个实例不得再起第二个节点上传器。
+// 锁文件落在 userData 目录下，走查测试应用用独立 --user-data-dir 时各拿
+// 各的锁，不影响 CDP 走查；同 profile 的第二个实例直接退出，已有实例聚焦。
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (win) {
+      if (win.isMinimized()) win.restore();
+      win.focus();
+    }
+  });
+  app.whenReady().then(async () => {
   store = new Store(userDataFile('state.json'));
   client = new ForumClient(API_BASE, { resolver });
   // 轻量 asar 自动更新：先看有没有上次暂存的新版，有就换上并 relaunch
@@ -428,7 +446,8 @@ app.whenReady().then(async () => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
-});
+  });
+}
 
 // 退出时把暂存的新 asar 换上去（下次启动即新版）；换不上也不阻塞退出。
 app.on('before-quit', () => {
