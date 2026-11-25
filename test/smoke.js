@@ -21,7 +21,7 @@ const { RealtimeClient } = require('../lib/realtimeClient');
 const { nextBackoffMs, INITIAL_BACKOFF_MS, MAX_BACKOFF_MS } = require('../lib/backoff');
 const { ServerResolver, PRIMARY_BASE, FALLBACK_BASE } = require('../lib/serverResolver');
 const { AppUpdater, compareVersions, sha256Hex } = require('../lib/appUpdater');
-const { NodeManager } = require('../lib/nodeManager');
+const { NodeManager, DEFAULT_L2_RPC, resolveL2Rpc } = require('../lib/nodeManager');
 const { Store } = require('../lib/store');
 
 const API_BASE = process.env.CHIMERA_API_BASE || 'https://forum.coldhao.win';
@@ -651,6 +651,11 @@ async function main() {
   ok(`SSE hello 收到，seq=${hello.seq}`);
 
   console.log('== 3. 轻节点（mock 种子） ==');
+  // L2 探针在 §3/§3b/§3c/§5b 里必须保持打不通：v0.3.12 起默认探 het 副本，
+  // 沙箱到 het 的 fetch 时快时慢，偶尔成功会多追加一条 l2-head、冲掉
+  // 这些用例精确计数的 seq/行数；探针本身由 §17 用本地 stub 覆盖。
+  // 127.0.0.1:1 恒拒连，失败是确定性的，不等 8 秒超时。
+  process.env.CHIMERA_L2_RPC = 'http://127.0.0.1:1';
   const seed = await startMockSeed();
   const seedUrl = `http://127.0.0.1:${seed.address().port}`;
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'chimera-node-test-'));
@@ -3458,6 +3463,160 @@ async function main() {
     assert.ok(hSrc.includes('revokeWorkspaceKey'), '论坛注册失败时应吊销刚注册的 DO 新 key');
     assert.ok(hSrc.includes('restoreKeyPair(rotated)'), '失败时应从归档恢复旧 keypair');
     ok('主进程接线：先查行拒重复绑定、轮换在先、DO 注册先于论坛注册、失败恢复旧 key');
+  }
+
+  console.log('== 17. L2 链头探针（v0.3.12：默认 het 副本） ==');
+  // Mock L2 RPC：只回 eth_blockNumber 的 result（可中途改值，供回退测试）。
+  function startMockL2Rpc(resultHex) {
+    let result = resultHex;
+    const server = http.createServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result }));
+      });
+    });
+    return new Promise((resolve) => {
+      server.listen(0, '127.0.0.1', () => resolve({
+        server,
+        url: `http://127.0.0.1:${server.address().port}`,
+        setResult: (r) => { result = r; },
+      }));
+    });
+  }
+  function restoreL2Env(prev) {
+    if (prev === undefined) delete process.env.CHIMERA_L2_RPC;
+    else process.env.CHIMERA_L2_RPC = prev;
+  }
+  // 17a. 地址解析：未配走默认 het 副本，配了优先用环境变量，配空回落默认。
+  {
+    const prev = process.env.CHIMERA_L2_RPC;
+    try {
+      delete process.env.CHIMERA_L2_RPC;
+      assert.strictEqual(resolveL2Rpc(), DEFAULT_L2_RPC, '未配时应走默认 het 副本');
+      assert.strictEqual(DEFAULT_L2_RPC, 'http://100.79.244.3:9545', '默认地址应为 het 尾网副本 9545');
+      process.env.CHIMERA_L2_RPC = 'http://127.0.0.1:9999';
+      assert.strictEqual(resolveL2Rpc(), 'http://127.0.0.1:9999', '配了环境变量应优先');
+      process.env.CHIMERA_L2_RPC = '   ';
+      assert.strictEqual(resolveL2Rpc(), DEFAULT_L2_RPC, '配空应回落默认');
+      ok('L2 地址解析：未配走默认 het 副本、配了优先、配空回落');
+    } finally { restoreL2Env(prev); }
+  }
+  // 17b. 探针打通：本地 stub 回块高时 l2Head 应记下高度并追加 l2-head 记录。
+  {
+    const prev = process.env.CHIMERA_L2_RPC;
+    const seed17b = await startMockSeed();
+    const rpc = await startMockL2Rpc('0x43113');
+    const tmp17b = fs.mkdtempSync(path.join(os.tmpdir(), 'chimera-l2-test-'));
+    try {
+      process.env.CHIMERA_L2_RPC = rpc.url;
+      const nm = new NodeManager({
+        nodeDir: path.join(tmp17b, 'node'),
+        apiBase: `http://127.0.0.1:${seed17b.address().port}`,
+        config: { enabled: false, port: 0, seeds: [] },
+        onLog: () => {},
+      });
+      await nm.start();
+      await nm.syncOnce();
+      assert.ok(nm.l2Head, '探通后 l2Head 应有值');
+      assert.strictEqual(nm.l2Head.height, 0x43113, '块高应为 stub 回的 0x43113（274707）');
+      const lines = fs.readFileSync(path.join(tmp17b, 'node', 'replica', 'headers.jsonl'), 'utf8')
+        .trim().split('\n').map((l) => JSON.parse(l));
+      assert.ok(lines.some((h) => h.kind === 'l2-head' && h.height === 0x43113), '应追加一条 l2-head 记录');
+      await nm.stop();
+      ok('L2 探针打通：块高 274707 已记，l2-head 已追加');
+    } finally {
+      restoreL2Env(prev);
+      rpc.server.close();
+      seed17b.close();
+      fs.rmSync(tmp17b, { recursive: true, force: true });
+    }
+  }
+  // 17c. RPC 回了非法块高：l2Head 保持 null，不抛错，同步仍成功。
+  {
+    const prev = process.env.CHIMERA_L2_RPC;
+    const seed17c = await startMockSeed();
+    const rpc = await startMockL2Rpc('not-a-number');
+    const tmp17c = fs.mkdtempSync(path.join(os.tmpdir(), 'chimera-l2-test-'));
+    try {
+      process.env.CHIMERA_L2_RPC = rpc.url;
+      const nm = new NodeManager({
+        nodeDir: path.join(tmp17c, 'node'),
+        apiBase: `http://127.0.0.1:${seed17c.address().port}`,
+        config: { enabled: false, port: 0, seeds: [] },
+        onLog: () => {},
+      });
+      await nm.start();
+      await nm.syncOnce();
+      assert.strictEqual(nm.l2Head, null, '非法块高时 l2Head 应保持 null');
+      assert.strictEqual(nm.lastSyncOk, true, '同步本身仍应成功');
+      await nm.stop();
+      ok('L2 探针容错：非法块高不抛错、l2Head 为 null、同步仍成功');
+    } finally {
+      restoreL2Env(prev);
+      rpc.server.close();
+      seed17c.close();
+      fs.rmSync(tmp17c, { recursive: true, force: true });
+    }
+  }
+  // 17d. RPC 不可达：l2Head 保持 null，不抛错，同步仍成功。
+  {
+    const prev = process.env.CHIMERA_L2_RPC;
+    const seed17d = await startMockSeed();
+    const tmp17d = fs.mkdtempSync(path.join(os.tmpdir(), 'chimera-l2-test-'));
+    try {
+      // 127.0.0.1:1 恒拒连，无需等 8 秒超时。
+      process.env.CHIMERA_L2_RPC = 'http://127.0.0.1:1';
+      const nm = new NodeManager({
+        nodeDir: path.join(tmp17d, 'node'),
+        apiBase: `http://127.0.0.1:${seed17d.address().port}`,
+        config: { enabled: false, port: 0, seeds: [] },
+        onLog: () => {},
+      });
+      await nm.start();
+      await nm.syncOnce();
+      assert.strictEqual(nm.l2Head, null, '不可达时 l2Head 应保持 null');
+      assert.strictEqual(nm.lastSyncOk, true, '同步本身仍应成功');
+      await nm.stop();
+      ok('L2 探针容错：RPC 不可达不抛错、l2Head 为 null、同步仍成功');
+    } finally {
+      restoreL2Env(prev);
+      seed17d.close();
+      fs.rmSync(tmp17d, { recursive: true, force: true });
+    }
+  }
+  // 17e. 块高回退：告警并保留旧头，不覆盖、不追加。
+  {
+    const prev = process.env.CHIMERA_L2_RPC;
+    const rpc = await startMockL2Rpc('0x100');
+    const tmp17e = fs.mkdtempSync(path.join(os.tmpdir(), 'chimera-l2-test-'));
+    try {
+      process.env.CHIMERA_L2_RPC = rpc.url;
+      const logs = [];
+      const nodeDir17e = path.join(tmp17e, 'node');
+      fs.mkdirSync(path.join(nodeDir17e, 'replica'), { recursive: true });
+      const nm = new NodeManager({
+        nodeDir: nodeDir17e,
+        apiBase: 'http://127.0.0.1:1', // 不走同步，只直接调 _syncL2Head
+        config: { enabled: false, port: 0, seeds: [] },
+        onLog: (l) => logs.push(l),
+      });
+      await nm._syncL2Head();
+      assert.ok(nm.l2Head && nm.l2Head.height === 0x100, '首次应记下高度 256');
+      rpc.setResult('0x50');
+      await nm._syncL2Head();
+      assert.strictEqual(nm.l2Head.height, 0x100, '回退时应保留旧头 256');
+      assert.ok(logs.some((l) => /回退/.test(l)), '回退时应记告警日志');
+      const l2lines = fs.readFileSync(path.join(nodeDir17e, 'replica', 'headers.jsonl'), 'utf8')
+        .trim().split('\n').map((l) => JSON.parse(l)).filter((h) => h.kind === 'l2-head');
+      assert.strictEqual(l2lines.length, 1, '回退时不应追加第二条 l2-head');
+      ok('L2 高度回退：告警并保留旧头，不追加');
+    } finally {
+      restoreL2Env(prev);
+      rpc.server.close();
+      fs.rmSync(tmp17e, { recursive: true, force: true });
+    }
   }
 
   console.log(`\nPASS: ${passed} 项全过`);
