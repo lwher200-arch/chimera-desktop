@@ -3009,7 +3009,7 @@ async function main() {
     assert.ok(m1400, '应有 1400px 断点');
     assert.ok(m1400[1].includes('.brand .sub { display: none; }'), '1400px 以下应藏品牌副标题');
     assert.ok(m1400[1].includes('#globalSearchInput { width: 140px; }'), '1400px 以下搜索框应收窄到 140px');
-    assert.ok(m1400[1].includes('.nav-btn { padding: 7px 8px; }'), '1400px 以下导航按钮应收紧内边距');
+    assert.ok(m1400[1].includes('.nav-btn { padding: 7px 6px; }'), '1400px 以下导航按钮应收紧内边距（v0.3.13：8px 时英文 1280 下节点被收进 More，6px 才放得下 7 项）');
     assert.ok(/\.topnav-links \{[^}]*overflow-x: auto/.test(css), '导航容器应可横向滚动兜底');
     assert.ok(css.includes('.topnav-links::-webkit-scrollbar { display: none; }'), '导航滚动条应隐藏');
     assert.ok(css.includes('@media (max-width: 1000px)'), '1000px 断点应保留');

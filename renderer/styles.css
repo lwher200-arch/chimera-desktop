@@ -517,10 +517,13 @@ select {
 .modal-card .comm-form label { display: flex; flex-direction: column; gap: 4px; }
 /* 窄屏顶栏（v0.3.1 走查，v0.3.8 上提到 1400px）：1400px 以下藏品牌副标题、
    收紧导航间距、收窄搜索框，让 7 个导航在 1280px 下中英文都放得下；
-   1000px 以下状态 pill 只留圆点，不让导航与右侧按钮叠在一起。 */
+   v0.3.13：导航内边距 8px→6px——英文 1280 下 7 项共需 462px、容器只剩
+   453px（右侧语言/退出按钮变宽 + 节点按钮带状态徽章最宽），8px 时节点
+   被收进 More，6px 后余 19px 空隙；1000px 以下状态 pill 只留圆点，
+   不让导航与右侧按钮叠在一起。 */
 @media (max-width: 1400px) {
   .brand .sub { display: none; }
-  .nav-btn { padding: 7px 8px; }
+  .nav-btn { padding: 7px 6px; }
   #topbar { gap: 8px; }
   .top-right { gap: 8px; }
   #globalSearchInput { width: 140px; }
