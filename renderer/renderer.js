@@ -33,6 +33,28 @@ function uiFmt(key) {
   return key;
 }
 
+// 主进程中文 throw 改错误码（v0.3.13）：IPC 只透传 message，code 嵌在
+// 消息里（ERR_CODE 或 ERR_CODE: 细节）。有码且字典有对应 err.* 文案时
+// 翻译显示；无码/无对应文案时原样显示服务端原话，不自己编理由。
+function errText(err) {
+  const m = String((err && err.message) || err || '');
+  const mm = m.match(/^(ERR_[A-Z0-9_]+)(?::\s?(.*))?$/s);
+  if (!mm) return m;
+  const key = {
+    ERR_LOGIN_NO_SESSION: 'err.loginNoSession',
+    ERR_NEED_LOGIN: 'err.needLogin',
+    ERR_BIND_NO_CHALLENGE: 'err.bindNoChallenge',
+    ERR_BIND_ALREADY_BOUND: 'err.bindAlreadyBound',
+    ERR_DO_REGISTER_FAILED: 'err.doRegisterFailed',
+    ERR_NODE_ALREADY_ACTIVATED: 'err.nodeAlreadyActivated',
+    ERR_NODE_ACTIVATE_NO_ACCOUNT: 'err.nodeActivateNoAccount',
+    ERR_NODE_TOKEN_OUTSIDE_DIR: 'err.nodeTokenOutsideDir',
+  }[mm[1]];
+  if (!key) return m;
+  if (mm[2] !== undefined && mm[2] !== '') return uiFmt(key, mm[2]);
+  return ui(key);
+}
+
 // 消息窗口：DOM 里最多留多少条消息；每页向前翻多少条（服务端 paginate
 // 的 limit 上限就是 100，再大也会被截到 100）。
 const MAX_RENDERED = 300;
@@ -71,6 +93,8 @@ const state = {
   feedPosts: [], // 主帖子页当前列表（含置顶）
   searchQuery: '', // 全站搜索当前关键词
   searchResults: null, // 全站搜索结果 {posts, messages, totalPosts, totalMessages}
+  homeHealth: null, // 首页统计最近一次 /api/health 回包（语言切换只重画不重拉）
+  homeLeaders: [], // 首页积分榜最近一次 leaders
   profileName: null, // 资料卡当前账号名
   profileFollow: null, // 资料卡当前关注状态（GET /api/follow/:name 回包）
   editingProfile: false, // 是否在编辑自己的资料
@@ -104,6 +128,51 @@ function fmtTime(ts) {
   const sameDay = d.toDateString() === now.toDateString();
   if (sameDay) return hhmm;
   return (d.getMonth() + 1) + '-' + d.getDate() + ' ' + hhmm;
+}
+
+// 运行时长格式化（v0.3.13）：秒数按量级折成小时/分/秒，不过字典，不裸显 's'。
+function fmtUptime(sec) {
+  const s = Math.max(0, Math.floor(Number(sec) || 0));
+  if (s >= 3600) return uiFmt('node.uptimeHours', Math.floor(s / 3600), Math.floor((s % 3600) / 60));
+  if (s >= 60) return uiFmt('node.uptimeMins', Math.floor(s / 60), s % 60);
+  return uiFmt('node.uptimeSecs', s);
+}
+
+// 输入防抖（v0.3.13）：高频 input 事件只在停顿后跑一次，避免每敲一字
+// 就 innerHTML 重建整个会话列表。返回的函数带 .cancel()（测试/卸载用）。
+function debounce(fn, ms) {
+  let timer = null;
+  function debounced(...args) {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => { timer = null; fn(...args); }, ms);
+  }
+  debounced.cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
+  return debounced;
+}
+
+// 资料卡 role/status 过字典（v0.3.13）：服务端回英文原值，中文模式
+// 不应裸显英文、英文模式不应带中文前缀；未知值原样显示，不编造。
+function profileRoleText(role) {
+  if (role === 'admin') return ui('profile.roleAdmin');
+  if (role === 'creator') return ui('profile.roleCreator');
+  if (role === 'member' || !role) return ui('profile.roleMember');
+  return String(role);
+}
+function profileStatusText(status) {
+  if (status === 'suspended') return ui('profile.statusSuspended');
+  if (status === 'retired') return ui('profile.statusRetired');
+  return String(status || '');
+}
+
+// 节点状态卡状态值过字典（v0.3.13）：运行中/启动中/停止中/出错/已停靠；
+// 未知状态原样显示，不编造。
+function nodeStateText(s) {
+  if (s === 'running') return ui('node.stateRunning');
+  if (s === 'starting') return ui('node.stateStarting');
+  if (s === 'stopping') return ui('node.stateStopping');
+  if (s === 'error') return ui('node.stateError');
+  if (s === 'off' || !s) return ui('node.stateOff');
+  return String(s);
 }
 
 // 未加入判定（v0.3.1）：publicGroup 带完整 members 数组，按当前登录人
@@ -174,6 +243,7 @@ function setTransport(st, detail) {
   state.lastTransport = { state: st, detail: detail || null };
   $('sseDot').className = 'dot ' + t.cls;
   $('sseText').textContent = ui(t.key) + transportSuffix(detail);
+  if (st === 'session-expired') resetToLogin();
 }
 
 // ---------- session ----------
@@ -207,19 +277,25 @@ $('loginBtn').addEventListener('click', async () => {
     show('main');
     await loadAll();
   } catch (err) {
-    $('loginErr').textContent = ui('login.failErr') + (err.message || err);
+    $('loginErr').textContent = ui('login.failErr') + errText(err);
   }
 });
 $('loginPass').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('loginBtn').click(); });
 
-$('logoutBtn').addEventListener('click', async () => {
-  await window.chimera.session.logout();
+// 会话失效回登录（v0.3.13）：登出与 401 过期共用；只清本地 UI 状态，
+// 过期时不调 logout（服务端会话已死，登出接口也会 401）。
+function resetToLogin() {
   state.me = null; state.open = null;
   $('whoami').textContent = '';
   delete $('whoami').dataset.profile;
   setMeChip();
   $('logoutBtn').classList.add('hidden');
   show('login');
+}
+
+$('logoutBtn').addEventListener('click', async () => {
+  await window.chimera.session.logout();
+  resetToLogin();
 });
 
 // ---------- nav ----------
@@ -238,18 +314,73 @@ function showPane(v) {
   if (v === 'node') refreshNodePanel();
   if (v === 'community') loadCommunity();
   if (v === 'team') loadTeam();
+  layoutTopNav();
 }
 document.querySelectorAll('.nav-btn').forEach((b) => {
+  if (!b.dataset.view) return; // “更多”按钮无 data-view，自己管开关菜单
   b.addEventListener('click', () => showPane(b.dataset.view));
 });
 document.querySelectorAll('.home-card').forEach((b) => {
   b.addEventListener('click', () => showPane(b.dataset.view));
 });
 
+// 窄屏导航收进“更多”（v0.3.13）：溢出项恒为后缀；纯函数可单测。
+// widths 是各导航按钮宽（含 gap），moreWidth 是“更多”按钮宽（含 gap）。
+const NAV_ORDER = ['home', 'conv', 'posts', 'search', 'community', 'team', 'node'];
+function greedyNavFit(widths, containerWidth, moreWidth) {
+  let total = widths.reduce((a, b) => a + b, 0);
+  let n = widths.length;
+  while (n > 0 && total + (n < widths.length ? moreWidth : 0) > containerWidth) {
+    n -= 1;
+    total -= widths[n];
+  }
+  return { visible: widths.slice(0, n).map((_, i) => i), overflow: widths.slice(n).map((_, i) => i + n) };
+}
+
+function layoutTopNav() {
+  const nav = document.querySelector('.topnav-links');
+  const menu = $('navMoreMenu');
+  const moreBtn = $('navMoreBtn');
+  if (!nav || !menu || !moreBtn) return;
+  // 先把所有导航按钮归位（从菜单里拿回来），按固定顺序排进 nav。
+  const btns = NAV_ORDER.map((v) => nav.querySelector(`[data-view="${v}"]`) || menu.querySelector(`[data-view="${v}"]`)).filter(Boolean);
+  btns.forEach((b) => nav.insertBefore(b, moreBtn));
+  const widths = btns.map((b) => (b.offsetWidth || 0) + 4);
+  const fit = greedyNavFit(widths, nav.clientWidth, (moreBtn.offsetWidth || 0) + 4);
+  const overflowSet = new Set(fit.overflow);
+  btns.forEach((b, i) => { if (overflowSet.has(i)) menu.appendChild(b); });
+  moreBtn.classList.toggle('hidden', fit.overflow.length === 0);
+  if (fit.overflow.length === 0) menu.classList.add('hidden');
+  // 当前页的按钮被收进菜单时，“更多”按钮标 active，给用户一个位置提示。
+  moreBtn.classList.toggle('active', btns.some((b, i) => overflowSet.has(i) && b.classList.contains('active')));
+}
+
+$('navMoreBtn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  const menu = $('navMoreMenu');
+  if (menu.classList.contains('hidden')) {
+    const r = $('navMoreBtn').getBoundingClientRect();
+    menu.style.top = `${r.bottom + 6}px`;
+    menu.style.left = `${Math.max(8, r.left)}px`;
+    menu.classList.remove('hidden');
+  } else {
+    menu.classList.add('hidden');
+  }
+});
+$('navMoreMenu').addEventListener('click', () => $('navMoreMenu').classList.add('hidden'));
+document.addEventListener('click', (e) => {
+  const menu = $('navMoreMenu');
+  if (!menu || menu.classList.contains('hidden')) return;
+  if (menu.contains(e.target) || $('navMoreBtn').contains(e.target)) return;
+  menu.classList.add('hidden');
+});
+window.addEventListener('resize', layoutTopNav);
+window.addEventListener('load', layoutTopNav);
+
 // ---------- conv list ----------
 $('tabGroups').addEventListener('click', () => { state.tab = 'groups'; syncTabs(); renderConvList(); });
 $('tabFriends').addEventListener('click', () => { state.tab = 'friends'; syncTabs(); renderConvList(); });
-$('convSearch').addEventListener('input', renderConvList);
+$('convSearch').addEventListener('input', debounce(renderConvList, 150));
 
 function syncTabs() {
   $('tabGroups').classList.toggle('active', state.tab === 'groups');
@@ -275,22 +406,32 @@ async function loadAll() {
 }
 
 // 首页数据化（v0.3.4）：健康计数 + 积分榜前三；任一失败只留空，不挡主界面。
+// 拉取与渲染已拆开（v0.3.13）：语言切换只调 renderHomeStats 同步重画，
+// 不重拉接口；失败不清空已有内容（缓存留上次成功的）。
 async function loadHomeStats() {
-  const box = $('homeStats');
-  if (!box) return;
   try {
-    const h = await window.chimera.api.health();
-    const counts = [[ui('home.statPosts'), h.posts], [ui('home.statGroups'), h.groups], [ui('home.statAccounts'), h.accounts], [ui('home.statMsgs'), h.messages]];
-    box.innerHTML = counts.map(([label, n]) => `<div class="home-stat"><b>${typeof n === 'number' ? n : '—'}</b><span>${label}</span></div>`).join('');
-  } catch { box.innerHTML = ''; }
+    state.homeHealth = await window.chimera.api.health();
+  } catch { /* 健康拉不到就留上次缓存，不清屏、不挡首页 */ }
   try {
     const lb = await window.chimera.api.leaderboard(3);
-    const rows = (lb && lb.leaders) || [];
-    if (Array.isArray(rows) && rows.length) {
-      $('homeBoard').classList.remove('hidden');
-      $('homeBoardList').innerHTML = rows.slice(0, 3).map((r) => `<li>${esc(r.name || '')} · ${esc(uiFmt('home.points', r.points ?? ''))}</li>`).join('');
-    }
+    state.homeLeaders = (lb && lb.leaders) || [];
   } catch { /* 榜单拉不到就不显示，不挡首页 */ }
+  renderHomeStats();
+}
+
+function renderHomeStats() {
+  const box = $('homeStats');
+  if (!box) return;
+  const h = state.homeHealth;
+  if (h) {
+    const counts = [[ui('home.statPosts'), h.posts], [ui('home.statGroups'), h.groups], [ui('home.statAccounts'), h.accounts], [ui('home.statMsgs'), h.messages]];
+    box.innerHTML = counts.map(([label, n]) => `<div class="home-stat"><b>${typeof n === 'number' ? n : '—'}</b><span>${label}</span></div>`).join('');
+  }
+  const rows = state.homeLeaders || [];
+  if (Array.isArray(rows) && rows.length) {
+    $('homeBoard').classList.remove('hidden');
+    $('homeBoardList').innerHTML = rows.slice(0, 3).map((r) => `<li>${esc(r.name || '')} · ${esc(uiFmt('home.points', r.points ?? ''))}</li>`).join('');
+  }
 }
 
 // 板块常驻（v0.3.1）：直接取 GET /api/boards 全量板块；拉失败明说原因、
@@ -964,7 +1105,7 @@ function renderProfile(acc, follow) {
     <div class="profile-head">
       ${avatar}
       <div><h2>${esc(acc.name)}</h2>
-      <div class="muted small">${acc.type === 'human' ? ui('profile.human') : acc.type === 'ai' ? ui('profile.ai') : ui('profile.node')} · ${esc(acc.role || 'member')} · ${esc(acc.level || '')} · ${uiFmt('profile.points', acc.points ?? 0)}${acc.status && acc.status !== 'active' ? ' · 已' + esc(acc.status) : ''}${acc.lastActiveTs ? ui('profile.lastActive') + esc(fmtTime(acc.lastActiveTs)) : ''}</div></div>
+      <div class="muted small">${acc.type === 'human' ? ui('profile.human') : acc.type === 'ai' ? ui('profile.ai') : ui('profile.node')} · ${esc(profileRoleText(acc.role))} · ${esc(acc.level || '')} · ${uiFmt('profile.points', acc.points ?? 0)}${acc.status && acc.status !== 'active' ? ' · ' + esc(profileStatusText(acc.status)) : ''}${acc.lastActiveTs ? ui('profile.lastActive') + esc(fmtTime(acc.lastActiveTs)) : ''}</div></div>
       <button class="btn ghost" data-action="close-profile">✕</button>
     </div>
     ${acc.bio ? `<p>${esc(acc.bio)}</p>` : ''}
@@ -1529,9 +1670,9 @@ async function refreshNodePanel() {
     $('nodeNavBadge').textContent = on ? ui('nav.nodeOn') : ui('nav.nodeOff');
     $('nodeNavBadge').className = 'node-badge ' + (on ? 'on' : 'off');
     $('nodeStats').innerHTML = `
-      <div class="stat-card"><div class="stat-label">${ui('node.statState')}</div><div class="stat-value">${esc(st.state)}</div></div>
+      <div class="stat-card"><div class="stat-label">${ui('node.statState')}</div><div class="stat-value">${esc(nodeStateText(st.state))}</div></div>
       <div class="stat-card"><div class="stat-label">${ui('node.statTier')}</div><div class="stat-value">${esc(st.tier === 'sync-upload' ? ui('node.syncUpload') : st.tier)}</div></div>
-      <div class="stat-card"><div class="stat-label">${ui('node.statUptime')}</div><div class="stat-value">${st.uptimeSec}s</div></div>
+      <div class="stat-card"><div class="stat-label">${ui('node.statUptime')}</div><div class="stat-value">${fmtUptime(st.uptimeSec)}</div></div>
       <div class="stat-card"><div class="stat-label">${ui('node.statHeaders')}</div><div class="stat-value">${uiFmt('node.countItems', st.headers)}</div></div>
       <div class="stat-card"><div class="stat-label">${ui('node.statPeers')}</div><div class="stat-value">${uiFmt('node.peersValue', st.peers, st.peersOnline)}</div></div>
       <div class="stat-card"><div class="stat-label">${ui('node.statLastSync')}</div><div class="stat-value">${esc(fmtTime(st.lastSyncAt) || '—')}（${st.lastSyncOk === false ? ui('common.fail') : ui('common.ok')}）</div></div>
@@ -1595,7 +1736,7 @@ $('workspaceBindBtn').addEventListener('click', async () => {
     await refreshWorkspaceBinding();
     const name = data && data.binding && data.binding.deviceName;
     if (name) alert(ui('node.bindOk') + name);
-  } catch (err) { alert(ui('node.bindFail') + (err.message || err)); }
+  } catch (err) { alert(ui('node.bindFail') + errText(err)); }
   finally { btn.disabled = false; }
 });
 
@@ -1605,7 +1746,7 @@ $('nodeToggle').addEventListener('change', async (e) => {
   try {
     await window.chimera.node.setEnabled(want);
   } catch (err) {
-    alert((want ? ui('node.startFail') : ui('node.stopFail')) + (err.message || err));
+    alert((want ? ui('node.startFail') : ui('node.stopFail')) + errText(err));
     e.target.checked = !want;
   } finally {
     $('nodeToggle').disabled = false;
@@ -1614,7 +1755,7 @@ $('nodeToggle').addEventListener('change', async (e) => {
 });
 
 $('nodeSyncBtn').addEventListener('click', async () => {
-  try { await window.chimera.node.syncNow(); } catch (err) { alert(ui('node.syncFail') + (err.message || err)); }
+  try { await window.chimera.node.syncNow(); } catch (err) { alert(ui('node.syncFail') + errText(err)); }
   await refreshNodePanel();
 });
 
@@ -1628,7 +1769,7 @@ $('nodeActivateBtn').addEventListener('click', async () => {
     const name = data && data.account && data.account.name;
     await refreshNodePanel();
     if (name) alert(ui('node.activated') + name);
-  } catch (err) { alert(ui('node.activateFail') + (err.message || err)); }
+  } catch (err) { alert(ui('node.activateFail') + errText(err)); }
   finally { btn.disabled = false; }
 });
 
@@ -1645,6 +1786,17 @@ $('nodeHeadersBtn').addEventListener('click', async () => {
 // 指示器只走 realtime:transport（v0.2.1）：onSseConnect/onSseDisconnect
 // 不再画指示器，避免两路状态打架。
 window.chimera.onRealtimeTransport(({ state, detail }) => setTransport(state, detail));
+// 会话过期（v0.3.13）：主进程 401 判定后推 session:expired，渲染进程回登录页。
+window.chimera.onSessionExpired(() => resetToLogin());
+// 更新已暂存（v0.3.13）：顶栏非打断提示，点一下隐藏，不弹窗、不打断。
+window.chimera.onUpdateStaged(({ version }) => {
+  const pill = $('updatePill');
+  if (!pill) return;
+  pill.textContent = uiFmt('top.updateReady', version);
+  pill.title = ui('top.updateReadyTitle');
+  pill.classList.remove('hidden');
+});
+$('updatePill').addEventListener('click', () => $('updatePill').classList.add('hidden'));
 window.chimera.onSseTruncated(() => { if (state.open) loadMessages(); });
 window.chimera.onSseEvent(async ({ event, data, seq }) => {
   if (Number.isFinite(seq)) state.lastSeq = seq;
@@ -1721,6 +1873,7 @@ function syncChrome() {
   if (typeof window !== 'undefined' && window.ChimeraTranslate && window.ChimeraTranslate.applyUiLang) {
     window.ChimeraTranslate.applyUiLang(document, state.lang);
   }
+  document.title = ui('top.title'); // 窗口标题跟随语言（v0.3.13）
   syncLangBtn();
   syncThemeBtn();
   if (state.lastTransport) setTransport(state.lastTransport.state, state.lastTransport.detail);
@@ -1752,6 +1905,8 @@ function syncChrome() {
   // 仍留启动时的语言；真实版块名靠 data-tr-name 名字队列翻，唯独它漏网。
   renderRightbar();
   syncOlderButton();
+  renderHomeStats(); // 首页统计卡跟随语言（v0.3.13）：只重画，不重拉
+  layoutTopNav(); // 窄屏导航重算可见项（v0.3.13）
 }
 
 function syncThemeBtn() {
@@ -1784,7 +1939,7 @@ $('langToggle').addEventListener('click', async () => {
   if (!$('pane-community').classList.contains('hidden')) renderCommunity();
   if (!$('pane-team').classList.contains('hidden')) renderTeam();
   if (!$('pane-search').classList.contains('hidden') && state.searchResults) renderSearchResults();
-  if (!$('pane-home').classList.contains('hidden')) await loadHomeStats();
+  if (!$('pane-home').classList.contains('hidden')) renderHomeStats();
   refreshDataTranslations();
 });
 

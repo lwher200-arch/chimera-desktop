@@ -3300,7 +3300,7 @@ async function main() {
           config: { enabled: false, port: 0, forumTokenFile: liveToken },
           onLog: () => {},
         }),
-        /不在节点数据目录内/,
+        (e) => e.code === 'ERR_NODE_TOKEN_OUTSIDE_DIR' && /ERR_NODE_TOKEN_OUTSIDE_DIR: .* 不在 .* 下/.test(e.message),
         '测试 profile 读 live token 文件时构造应直接抛错',
       );
       // token 在 nodeDir 内：应正常构造（且 _readForumToken 能读到）
@@ -3447,14 +3447,14 @@ async function main() {
   // 在先、DO 注册在论坛注册之前、失败恢复旧 key。
   {
     const mainSrc = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
-    const hAt = mainSrc.indexOf("ipcMain.handle('api:workspace-bind'");
+    const hAt = mainSrc.indexOf("apiHandle('api:workspace-bind'");
     assert.ok(hAt >= 0, 'main.js 应包含 api:workspace-bind');
-    const hEnd = mainSrc.indexOf("ipcMain.handle('api:workspace-bindings'", hAt);
+    const hEnd = mainSrc.indexOf("apiHandle('api:workspace-bindings'", hAt);
     const hSrc = mainSrc.slice(hAt, hEnd);
     assert.ok(mainSrc.includes("require('./lib/doRegistry')"), 'main.js 应引入 lib/doRegistry');
     assert.ok(hSrc.includes('myWorkspaceBindings(token)'), 'bind 前应先查本人绑定行');
     assert.ok(hSrc.indexOf('myWorkspaceBindings(token)') < hSrc.indexOf('registerWorkspaceBinding'), '查行应在论坛注册之前');
-    assert.ok(hSrc.includes('已绑定工作区，请先解绑再重绑'), '已有活跃绑定时应拒绝重绑');
+    assert.ok(hSrc.includes("codedError('ERR_BIND_ALREADY_BOUND')"), '已有活跃绑定时应拒绝重绑');
     assert.ok(hSrc.includes('shouldRotateKeyPair'), '应按轮换规则判定是否发新 keypair');
     assert.ok(hSrc.includes('archiveKeyPair()'), '轮换时应先归档旧 keypair');
     assert.ok(hSrc.includes('generateFreshKeyPair()'), '轮换时应生成新 keypair');
@@ -3617,6 +3617,496 @@ async function main() {
       rpc.server.close();
       fs.rmSync(tmp17e, { recursive: true, force: true });
     }
+  }
+
+  console.log('== 18. v0.3.13 小改进：更多导航 / 401 / 首页统计 / 翻译分流 / i18n / LRU / 防抖 / 更新提示 ==');
+  // §13/§14 末尾删掉了假 localStorage；本节多处要切语言，先补回来。
+  if (typeof globalThis.localStorage === 'undefined') {
+    globalThis.localStorage = {
+      _s: {},
+      getItem(k) { return this._s[k] === undefined ? null : this._s[k]; },
+      setItem(k, v) { this._s[k] = String(v); },
+    };
+  }
+  const rendererSrc18 = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'renderer.js'), 'utf8');
+  const mainSrc18 = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  const preloadSrc18 = fs.readFileSync(path.join(__dirname, '..', 'preload.js'), 'utf8');
+  const html18 = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'index.html'), 'utf8');
+  const css18 = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'styles.css'), 'utf8');
+  const extractFn18 = (name) => {
+    const m = rendererSrc18.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n\\}`));
+    assert.ok(m, `renderer.js 应包含 ${name}`);
+    return m[0];
+  };
+  const sleep18 = (ms) => new Promise((r) => setTimeout(r, ms));
+  const makeBox18 = (id) => ({
+    _html: '', _removed: false, _attrs: { 'data-trid': id },
+    set innerHTML(v) { this._html = v; },
+    get innerHTML() { return this._html; },
+    getAttribute(k) { return this._attrs[k] || null; },
+    removeAttribute(k) { delete this._attrs[k]; },
+    remove() { this._removed = true; },
+    closest() { return this; },
+    querySelector() { return null; },
+  });
+  // 18a. greedyNavFit：纯函数，溢出恒为后缀，More 按钮宽度计入。
+  {
+    const greedyNavFit = new Function(`${extractFn18('greedyNavFit')}; return greedyNavFit;`)();
+    assert.deepStrictEqual(greedyNavFit([60, 60, 60, 60, 60, 60, 60], 500, 70), { visible: [0, 1, 2, 3, 4, 5, 6], overflow: [] }, '全放得下时不应溢出');
+    assert.deepStrictEqual(greedyNavFit([60, 60, 60, 60, 60, 60, 60], 400, 70), { visible: [0, 1, 2, 3, 4], overflow: [5, 6] }, '400px 应溢出最后两项（300+70≤400<360+70）');
+    // 审计实测：1024px 英文 navScrollW 458 vs clientW 197。
+    assert.deepStrictEqual(greedyNavFit([80, 70, 60, 70, 60, 57, 61], 197, 70), { visible: [0], overflow: [1, 2, 3, 4, 5, 6] }, '1024px 英文应只剩第一项，其余进“更多”');
+    assert.deepStrictEqual(greedyNavFit([300, 300], 100, 70), { visible: [], overflow: [0, 1] }, '极窄时应全部溢出');
+    assert.deepStrictEqual(greedyNavFit([100, 100, 100], 300, 70), { visible: [0, 1, 2], overflow: [] }, '恰好放下时不收 More');
+    assert.deepStrictEqual(greedyNavFit([100, 100, 100], 299, 70), { visible: [0, 1], overflow: [2] }, '差 1px 时收最后一项');
+    ok('greedyNavFit：全放/溢出一项/审计窄屏/全溢出/恰好放下六态正确');
+  }
+  // 18b. 更多导航接线：HTML ids、CSS 规则、调用点。
+  {
+    assert.ok(html18.includes('id="navMoreBtn"'), '应有 navMoreBtn');
+    assert.ok(html18.includes('id="navMoreMenu"'), '应有 navMoreMenu');
+    assert.ok(html18.includes('id="updatePill"'), '应有 updatePill');
+    assert.ok(html18.includes('data-i18n="nav.more"'), '更多按钮应走字典 nav.more');
+    assert.ok(html18.includes('data-i18n-title="nav.moreTitle"'), '更多按钮 title 应走字典 nav.moreTitle');
+    assert.ok(/\.nav-more-menu \{[^}]*position: absolute/.test(css18), '更多菜单应绝对定位');
+    assert.ok(/\.update-pill \{[^}]*border-radius: 999px/.test(css18), '更新 pill 应为圆角');
+    assert.ok(/#topbar \{[^}]*position: relative/.test(css18), 'topbar 应为更多菜单的定位锚点');
+    const showPaneSrc = extractFn18('showPane');
+    assert.ok(showPaneSrc.includes('layoutTopNav()'), 'showPane 末尾应重算导航');
+    const syncChromeSrc = extractFn18('syncChrome');
+    assert.ok(syncChromeSrc.includes('layoutTopNav()'), 'syncChrome 末尾应重算导航');
+    assert.ok(syncChromeSrc.includes('renderHomeStats()'), 'syncChrome 应重画首页统计');
+    assert.ok(syncChromeSrc.includes("document.title = ui('top.title')"), 'syncChrome 应设窗口标题');
+    assert.ok(rendererSrc18.includes("addEventListener('resize', layoutTopNav)"), 'resize 应重算导航');
+    assert.ok(rendererSrc18.includes("addEventListener('load', layoutTopNav)"), 'load 应重算导航');
+    assert.ok(rendererSrc18.includes('if (!b.dataset.view) return;'), '导航点击绑定应跳过无 data-view 的“更多”按钮');
+    ok('更多导航接线：HTML ids + CSS + showPane/syncChrome/resize/load 调用点齐全');
+  }
+  // 18c. SseClient 建连 401：错误带上 err.status。
+  {
+    const prevFetch = globalThis.fetch;
+    globalThis.fetch = async () => ({ ok: false, status: 401, body: null });
+    try {
+      const sse = new SseClient('http://127.0.0.1:1', { token: 'tok-x' });
+      let caught = null;
+      try { await sse._connectOnce(); } catch (e) { caught = e; }
+      assert.ok(caught, '401 建连应抛错');
+      assert.strictEqual(caught.status, 401, '建连失败的错误应带 status 401');
+      assert.match(caught.message, /401/, '错误信息应含 401');
+    } finally { globalThis.fetch = prevFetch; }
+    ok('SseClient 建连 401：错误带 err.status=401');
+  }
+  // 18d. RealtimeClient：WS 挂掉后 SSE 建连 401 → session-expired（不经 checkSession）。
+  {
+    const prevFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => {
+      assert.ok(String(url).includes('/api/stream'), 'SSE 应走 /api/stream');
+      return { ok: false, status: 401, body: null };
+    };
+    const rc = new RealtimeClient('http://127.0.0.1:1', {
+      token: 'tok-xyz',
+      wsUrl: 'ws://127.0.0.1:1',
+      checkSession: async () => {}, // 恒通过：证明 401 是 SSE 路自己认出来的
+    });
+    try {
+      const expired = new Promise((resolve) => rc.once('session-expired', resolve));
+      const transports = [];
+      rc.on('transport', (p) => transports.push(p.state));
+      rc.start();
+      const ev = await withTimeout(expired, 8000, 'SSE 401 应触发 session-expired');
+      assert.strictEqual(rc.sessionExpired, true, 'sessionExpired 标志应为真');
+      assert.ok(transports.includes('session-expired'), 'transport 应报 session-expired');
+      assert.match(String((ev && ev.reason) || ''), /会话已失效/, '原因应说明会话已失效');
+    } finally {
+      rc.stop();
+      globalThis.fetch = prevFetch;
+    }
+    ok('RealtimeClient：WS 挂 + SSE 401 → session-expired，不无限重连');
+  }
+
+  // 18e. main.js 401 接线：guardApi 包住全部需 token 的 api 处理器。
+  {
+    assert.ok(mainSrc18.includes('function guardApi(fn)'), '应有 guardApi');
+    assert.ok(mainSrc18.includes('function onSessionExpired()'), '应有 onSessionExpired');
+    assert.ok(mainSrc18.includes("sendToRenderer('session:expired'"), '过期应推 session:expired');
+    assert.ok(mainSrc18.includes('function apiHandle(channel, fn)'), '应有 apiHandle');
+    const n = (mainSrc18.match(/apiHandle\('api:/g) || []).length;
+    assert.strictEqual(n, 41, `需 token 的 api 处理器应有 41 个包进 guardApi，实际 ${n} 个`);
+    for (const ch of ['api:health', 'api:leaderboard', 'api:accounts', 'api:boards']) {
+      assert.ok(mainSrc18.includes(`ipcMain.handle('${ch}'`), `${ch} 公共接口应保持 plain ipcMain.handle`);
+      assert.ok(!mainSrc18.includes(`apiHandle('${ch}'`), `${ch} 不应包 guardApi`);
+    }
+    assert.ok(mainSrc18.includes("realtime.on('session-expired'"), 'realtime session-expired 应有订阅');
+    assert.ok(/realtime\.on\('session-expired'[\s\S]*?onSessionExpired\(\)/.test(mainSrc18), 'session-expired 处理应调 onSessionExpired');
+    ok('main.js 401 接线：guardApi + onSessionExpired + 41 个处理器 + 4 个公共接口除外');
+  }
+  // 18f. resetToLogin：抽函数在假 DOM 上跑；setTransport 遇 session-expired 调它。
+  {
+    const makeEl18 = () => {
+      const el = {
+        textContent: '', className: '',
+        dataset: {},
+        _classes: new Set(),
+        classList: {
+          add: (c) => el._classes.add(c),
+          remove: (c) => el._classes.delete(c),
+          toggle: (c, f) => { if (f) el._classes.add(c); else el._classes.delete(c); },
+          contains: (c) => el._classes.has(c),
+        },
+      };
+      return el;
+    };
+    const els = { whoami: makeEl18(), logoutBtn: makeEl18(), whoamiAvatar: makeEl18(), sseDot: makeEl18(), sseText: makeEl18() };
+    els.whoami.textContent = 'coldhao';
+    els.whoami.dataset.profile = 'coldhao';
+    const fakeState = { me: { username: 'coldhao' }, open: { kind: 'group', id: 'g1' } };
+    let chipCalls = 0;
+    const shown = [];
+    const resetToLogin = new Function('state', '$', 'setMeChip', 'show',
+      `${extractFn18('resetToLogin')}; return resetToLogin;`)(fakeState, (id) => els[id], () => { chipCalls += 1; }, (v) => shown.push(v));
+    resetToLogin();
+    assert.strictEqual(fakeState.me, null, '应清 me');
+    assert.strictEqual(fakeState.open, null, '应清 open');
+    assert.strictEqual(els.whoami.textContent, '', '应清 whoami 文本');
+    assert.strictEqual(els.whoami.dataset.profile, undefined, '应清 profile 标记');
+    assert.strictEqual(chipCalls, 1, '应重画 whoami chip');
+    assert.ok(els.logoutBtn._classes.has('hidden'), '应藏退出按钮');
+    assert.deepStrictEqual(shown, ['login'], '应切到登录页');
+    const TRANSPORT_UI18 = {
+      connecting: { cls: 'off', key: 'top.connecting' },
+      ws: { cls: 'on', key: 'top.wsConnected' },
+      sse: { cls: 'warn', key: 'top.sseFallback' },
+      disconnected: { cls: 'bad', key: 'top.disconnected' },
+      'session-expired': { cls: 'bad', key: 'top.sessionExpired' },
+    };
+    let resetCalls = 0;
+    const setTransport = new Function('TRANSPORT_UI', 'state', '$', 'ui', 'transportSuffix', 'resetToLogin',
+      `${extractFn18('setTransport')}; return setTransport;`)(TRANSPORT_UI18, fakeState, (id) => els[id], (k) => k, () => '', () => { resetCalls += 1; });
+    setTransport('ws', null);
+    assert.strictEqual(resetCalls, 0, 'ws 不应回登录');
+    setTransport('session-expired', null);
+    assert.strictEqual(resetCalls, 1, 'session-expired 应回登录');
+    ok('resetToLogin：清状态 + 回登录页；setTransport 只在 session-expired 时调它');
+  }
+  // 18g. renderHomeStats：语言切换只重画，不重拉接口。
+  {
+    tr.setViewerLang('zh');
+    tr._resetForTest();
+    let healthCalls = 0;
+    let lbCalls = 0;
+    const homeBox = {
+      _html: '',
+      set innerHTML(v) { this._html = v; },
+      get innerHTML() { return this._html; },
+    };
+    const homeBoard = {
+      _classes: new Set(),
+      classList: {
+        remove: (c) => homeBoard._classes.delete(c),
+        add: (c) => homeBoard._classes.add(c),
+        contains: (c) => homeBoard._classes.has(c),
+      },
+    };
+    const homeBoardList = {
+      _html: '',
+      set innerHTML(v) { this._html = v; },
+      get innerHTML() { return this._html; },
+    };
+    const fakeWindow = { chimera: { api: {
+      health: async () => { healthCalls += 1; return { posts: 10, groups: 2, accounts: 5, messages: 100 }; },
+      leaderboard: async () => { lbCalls += 1; return { leaders: [{ name: 'a', points: 209 }] }; },
+    } } };
+    const fake$ = (id) => ({ homeStats: homeBox, homeBoard, homeBoardList }[id] || null);
+    const fakeState18 = { homeHealth: null, homeLeaders: [] };
+    const renderHomeStats18 = new Function('state', '$', 'ui', 'uiFmt', 'esc',
+      `${extractFn18('renderHomeStats')}; return renderHomeStats;`)(fakeState18, fake$, (k) => tr.ui(k), (...a) => tr.uiFmt(...a), (s) => String(s));
+    const loadHomeStats = new Function('state', '$', 'window', 'renderHomeStats',
+      `${extractFn18('loadHomeStats')}; return loadHomeStats;`)(fakeState18, fake$, fakeWindow, renderHomeStats18);
+    await loadHomeStats();
+    assert.strictEqual(healthCalls, 1, '首拉应调一次 health');
+    assert.strictEqual(lbCalls, 1, '首拉应调一次 leaderboard');
+    assert.ok(homeBox._html.includes('帖子'), '中文下统计标签应为“帖子”');
+    assert.ok(homeBox._html.includes('>10<'), '统计值应渲染');
+    assert.ok(homeBoardList._html.includes('209 分'), '中文下积分后缀应为“分”');
+    tr.setViewerLang('en');
+    renderHomeStats18();
+    assert.strictEqual(healthCalls, 1, '语言切换不应重拉 health');
+    assert.strictEqual(lbCalls, 1, '语言切换不应重拉 leaderboard');
+    assert.ok(homeBox._html.includes('Posts'), '英文下统计标签应为 Posts');
+    assert.ok(homeBoardList._html.includes('209 pts'), '英文下积分后缀应为 pts');
+    tr.setViewerLang('zh');
+    ok('renderHomeStats：语言切换只重画不重拉，统计标签与积分后缀跟随语言');
+  }
+  // 18h. 翻译失败分流：429 自动重试、网络错留重试按钮、名字失败不清 trJobId。
+  {
+    tr._resetForTest();
+    tr.setViewerLang('zh');
+    const isRL = tr._isRateLimitError;
+    assert.strictEqual(isRL({ status: 429 }), true, 'status 429 应判节流');
+    assert.strictEqual(isRL(new Error('HTTP 429')), true, '消息含 429 应判节流');
+    assert.strictEqual(isRL(new Error('translate rate limited, try again later')), true, '消息含 rate limited 应判节流');
+    assert.strictEqual(isRL(new Error('fetch failed')), false, '网络错不应判节流');
+    assert.strictEqual(isRL({ status: 500 }), false, '500 不应判节流');
+    assert.strictEqual(isRL(null), false, 'null 不应判节流');
+    ok('isRateLimitError：status 429 / 消息 429 / rate limited 三路判真，其余判假');
+    // batchFn 抛 status 429：50ms 后自动重试并渲染。
+    tr._resetForTest();
+    tr._setRetryDelayMs(50);
+    let tries = 0;
+    tr.setBatchFn(async (items) => {
+      tries += 1;
+      if (tries === 1) { const e = new Error('SSE connect failed: HTTP 429'); e.status = 429; throw e; }
+      return items.map((it) => ({ translated: `译：${it.text}`, same: false }));
+    });
+    const box429 = makeBox18(tr.placeholder('English message for http 429 retry test.').match(/data-trid="(at\d+)"/)[1]);
+    tr.observeTranslations({ querySelectorAll: () => [box429] });
+    await sleep18(1200);
+    assert.strictEqual(tries, 2, `HTTP 429 应自动重试一次，实际调了 ${tries} 次`);
+    assert.ok(box429._html.includes('译：English message for http 429'), '重试成功后应渲染译文');
+    ok('翻译 429：batchFn 抛 status 429 → 自动重试一次并渲染');
+    // 消息里只有 429（IPC 丢 status 时）：同样自动重试。
+    tr._resetForTest();
+    tr._setRetryDelayMs(50);
+    let tries2 = 0;
+    tr.setBatchFn(async (items) => {
+      tries2 += 1;
+      if (tries2 === 1) throw new Error('HTTP 429 Too Many Requests');
+      return items.map((it) => ({ translated: `译：${it.text}`, same: false }));
+    });
+    const box429b = makeBox18(tr.placeholder('English message for message only 429 test.').match(/data-trid="(at\d+)"/)[1]);
+    tr.observeTranslations({ querySelectorAll: () => [box429b] });
+    await sleep18(1200);
+    assert.strictEqual(tries2, 2, `消息 429 应自动重试一次，实际调了 ${tries2} 次`);
+    assert.ok(box429b._html.includes('译：English message for message only 429'), '消息 429 重试成功后应渲染译文');
+    tr._setRetryDelayMs(65000);
+    ok('翻译 429：消息-only 429 同样自动重试');
+    // 网络错：留重试按钮，不自动重试。
+    tr._resetForTest();
+    let netTries = 0;
+    tr.setBatchFn(async () => { netTries += 1; throw new Error('fetch failed'); });
+    const boxNet = makeBox18(tr.placeholder('English message for network failure test.').match(/data-trid="(at\d+)"/)[1]);
+    tr.observeTranslations({ querySelectorAll: () => [boxNet] });
+    await sleep18(600);
+    assert.strictEqual(netTries, 1, '网络错不应自动重试');
+    assert.ok(boxNet._html.includes('data-tr-retry'), '网络错应留重试按钮');
+    ok('翻译网络错：不自动重试，留重试按钮');
+    // 名字失败：trJobId 保留，重复 observe 不建新 job。
+    tr._resetForTest();
+    let nameTries = 0;
+    tr.setBatchFn(async (items) => { nameTries += 1; return items.map(() => ({ error: 'translation failed' })); });
+    const nameEl = {
+      _attrs: { 'data-tr-name': 'English group name for failure test' },
+      dataset: {},
+      textContent: 'English group name for failure test',
+      getAttribute(k) { return this._attrs[k] || null; },
+    };
+    const nameRoot = { querySelectorAll: () => [nameEl] };
+    tr.observeNameTranslations(nameRoot);
+    const jobId = nameEl.dataset.trJobId;
+    assert.ok(jobId, '名字入队应打 trJobId');
+    tr.flushNow();
+    await sleep18(400);
+    assert.strictEqual(nameTries, 1, '名字应调一次接口');
+    assert.strictEqual(nameEl.dataset.trJobId, jobId, '名字失败后 trJobId 应保留');
+    assert.strictEqual(nameEl.textContent, 'English group name for failure test', '名字失败应留原文');
+    tr.observeNameTranslations(nameRoot);
+    tr.flushNow();
+    await sleep18(400);
+    assert.strictEqual(nameTries, 1, '重复 observe 不应建新 job、不应再调接口');
+    assert.strictEqual(nameEl.dataset.trJobId, jobId, '重复 observe 后 trJobId 应不变');
+    ok('名字翻译失败：不清 trJobId、不重复建 job，留原文');
+  }
+
+  // 18i. 翻译缓存 LRU 上限 500：超了淘汰最旧，命中刷新新近度。
+  {
+    tr._resetForTest();
+    tr.setViewerLang('zh');
+    assert.strictEqual(tr._cacheMax(), 500, '缓存上限应为 500');
+    const seen = [];
+    tr.setBatchFn(async (items) => {
+      seen.push(...items.map((it) => it.text));
+      return items.map((it) => ({ translated: `译：${it.text}`, same: false }));
+    });
+    const fillText = (i) => `English cache fill message number ${i} for eviction test.`;
+    const boxes = [];
+    const root = { querySelectorAll: () => boxes.filter((b) => !b._removed && b.getAttribute('data-trid')) };
+    for (let i = 0; i < 505; i++) {
+      const html = tr.placeholder(fillText(i));
+      const id = html.match(/data-trid="(at\d+)"/)[1];
+      boxes.push(makeBox18(id));
+    }
+    tr.observeTranslations(root);
+    await sleep18(1500);
+    assert.strictEqual(tr._cacheSize(), 500, '填 505 条后缓存应为 500 条');
+    assert.strictEqual(seen.length, 505, `应调接口译 505 条，实际 ${seen.length} 条`);
+    // 最旧 5 条已被淘汰：再入队应调接口；最新一条应命中。
+    const before0 = seen.length;
+    const box0 = makeBox18(tr.placeholder(fillText(0)).match(/data-trid="(at\d+)"/)[1]);
+    tr.observeTranslations({ querySelectorAll: () => [box0] });
+    await sleep18(600);
+    assert.ok(seen.length > before0, '第 0 条被淘汰后应重新调接口');
+    assert.ok(box0._html.includes('译：English cache fill message number 0'), '重译后应渲染');
+    const before504 = seen.length;
+    const box504 = makeBox18(tr.placeholder(fillText(504)).match(/data-trid="(at\d+)"/)[1]);
+    tr.observeTranslations({ querySelectorAll: () => [box504] });
+    await sleep18(600);
+    assert.strictEqual(seen.length, before504, '第 504 条命中缓存不应再调接口');
+    assert.ok(box504._html.includes('译：English cache fill message number 504'), '命中应直接渲染');
+    // 新近度：命中第 10 条刷新它，再填 5 条新项，淘汰的是最旧的 6–9、11，
+    // 而不是被刷新过的 10。
+    const box10 = makeBox18(tr.placeholder(fillText(10)).match(/data-trid="(at\d+)"/)[1]);
+    tr.observeTranslations({ querySelectorAll: () => [box10] });
+    await sleep18(600);
+    assert.strictEqual(seen.length, before504, '第 10 条命中不应调接口');
+    const moreBoxes = [];
+    for (let i = 505; i < 510; i++) {
+      const id = tr.placeholder(fillText(i)).match(/data-trid="(at\d+)"/)[1];
+      moreBoxes.push(makeBox18(id));
+    }
+    tr.observeTranslations({ querySelectorAll: () => moreBoxes.filter((b) => !b._removed && b.getAttribute('data-trid')) });
+    await sleep18(900);
+    assert.strictEqual(tr._cacheSize(), 500, '再填 5 条后缓存仍应为 500 条');
+    const before10 = seen.length;
+    const box10b = makeBox18(tr.placeholder(fillText(10)).match(/data-trid="(at\d+)"/)[1]);
+    tr.observeTranslations({ querySelectorAll: () => [box10b] });
+    await sleep18(600);
+    assert.strictEqual(seen.length, before10, '被刷新过的第 10 条应仍在缓存里');
+    const before6 = seen.length;
+    const box6 = makeBox18(tr.placeholder(fillText(6)).match(/data-trid="(at\d+)"/)[1]);
+    tr.observeTranslations({ querySelectorAll: () => [box6] });
+    await sleep18(600);
+    assert.ok(seen.length > before6, '未被刷新过的第 6 条应已被淘汰');
+    ok('翻译缓存 LRU：上限 500、最旧淘汰、命中刷新新近度');
+  }
+  // 18j. debounce：连敲只跑一次，cancel 能拦住；会话搜索已接防抖。
+  {
+    const debounce = new Function(`${extractFn18('debounce')}; return debounce;`)();
+    let runs = 0;
+    let lastArg = null;
+    const fn = debounce((x) => { runs += 1; lastArg = x; }, 100);
+    fn('a'); fn('b'); fn('c');
+    await sleep18(200);
+    assert.strictEqual(runs, 1, '连敲 3 次应只跑一次');
+    assert.strictEqual(lastArg, 'c', '应取最后一次参数');
+    let runs2 = 0;
+    const fn2 = debounce(() => { runs2 += 1; }, 100);
+    fn2();
+    fn2.cancel();
+    await sleep18(200);
+    assert.strictEqual(runs2, 0, 'cancel 后不应跑');
+    assert.ok(rendererSrc18.includes("$('convSearch').addEventListener('input', debounce(renderConvList, 150))"), '会话搜索 input 应接 150ms 防抖');
+    ok('debounce：连敲合并一次、取末参、cancel 拦截；convSearch 已接线');
+  }
+  // 18k. errText：8 个错误码双语映射 + 细节代入 + 未知原样透传。
+  {
+    const errText = new Function('ui', 'uiFmt', `${extractFn18('errText')}; return errText;`)((k) => tr.ui(k), (...a) => tr.uiFmt(...a));
+    tr.setViewerLang('zh');
+    assert.strictEqual(errText(new Error('ERR_LOGIN_NO_SESSION')), '服务端未返回会话', '登录无会话中文');
+    assert.strictEqual(errText(new Error('ERR_NEED_LOGIN')), '请先登录人类账号', '需登录中文');
+    assert.strictEqual(errText(new Error('ERR_BIND_NO_CHALLENGE')), '缺少挑战串', '绑定缺挑战串中文');
+    assert.strictEqual(errText(new Error('ERR_BIND_ALREADY_BOUND')), '已绑定工作区，请先解绑再重绑', '已绑定中文');
+    assert.strictEqual(errText(new Error('ERR_DO_REGISTER_FAILED: boom')), '注册公钥到信任层失败：boom', 'DO 注册失败中文应代入细节');
+    assert.strictEqual(errText(new Error('ERR_NODE_ALREADY_ACTIVATED')), '节点已激活过，无需重复激活', '已激活中文');
+    assert.strictEqual(errText(new Error('ERR_NODE_ACTIVATE_NO_ACCOUNT')), '服务端未返回节点账号', '激活无账号中文');
+    assert.strictEqual(errText(new Error('ERR_NODE_TOKEN_OUTSIDE_DIR: /a 不在 /b 下')), '节点 token 文件不在节点数据目录内，拒绝启动：/a 不在 /b 下', 'token 越目录中文应代入细节');
+    tr.setViewerLang('en');
+    assert.strictEqual(errText(new Error('ERR_LOGIN_NO_SESSION')), 'The server did not return a session', '登录无会话英文');
+    assert.strictEqual(errText('ERR_NEED_LOGIN'), 'Please log in with a human account first', '字符串入参也应翻译');
+    assert.strictEqual(errText(new Error('ERR_DO_REGISTER_FAILED: boom')), 'Failed to register the public key with the trust layer: boom', 'DO 注册失败英文应代入细节');
+    assert.strictEqual(errText(new Error('ERR_NODE_TOKEN_OUTSIDE_DIR: /a not under /b')), 'The node token file is outside the node data directory; refusing to start: /a not under /b', 'token 越目录英文应代入细节');
+    assert.strictEqual(errText(new Error('ERR_SOMETHING_ELSE: x')), 'ERR_SOMETHING_ELSE: x', '未知错误码应原样透传');
+    assert.strictEqual(errText(new Error('plain server message')), 'plain server message', '无码服务端原话应原样透传');
+    assert.strictEqual(errText(null), '', 'null 应为空串');
+    tr.setViewerLang('zh');
+    ok('errText：8 码双语映射 + 细节代入 + 未知/原话透传');
+  }
+  // 18l. fmtUptime / nodeStateText / profileRoleText / profileStatusText 双语表。
+  {
+    const ui18 = (k) => tr.ui(k);
+    const uiFmt18 = (...a) => tr.uiFmt(...a);
+    const fmtUptime = new Function('uiFmt', `${extractFn18('fmtUptime')}; return fmtUptime;`)(uiFmt18);
+    const nodeStateText = new Function('ui', `${extractFn18('nodeStateText')}; return nodeStateText;`)(ui18);
+    const profileRoleText = new Function('ui', `${extractFn18('profileRoleText')}; return profileRoleText;`)(ui18);
+    const profileStatusText = new Function('ui', `${extractFn18('profileStatusText')}; return profileStatusText;`)(ui18);
+    tr.setViewerLang('zh');
+    assert.strictEqual(fmtUptime(0), '0 秒', '0 秒');
+    assert.strictEqual(fmtUptime(45), '45 秒', '45 秒');
+    assert.strictEqual(fmtUptime(60), '1 分 0 秒', '60 秒应为 1 分 0 秒');
+    assert.strictEqual(fmtUptime(3661), '1 小时 1 分', '3661 秒应为 1 小时 1 分');
+    assert.strictEqual(fmtUptime(7320), '2 小时 2 分', '7320 秒应为 2 小时 2 分');
+    assert.strictEqual(nodeStateText('running'), '运行中', 'running 中文');
+    assert.strictEqual(nodeStateText('starting'), '启动中', 'starting 中文');
+    assert.strictEqual(nodeStateText('stopping'), '停止中', 'stopping 中文');
+    assert.strictEqual(nodeStateText('error'), '出错', 'error 中文');
+    assert.strictEqual(nodeStateText('off'), '已停靠', 'off 中文');
+    assert.strictEqual(nodeStateText('weird'), 'weird', '未知状态原样');
+    assert.strictEqual(profileRoleText('admin'), '管理员', 'admin 中文');
+    assert.strictEqual(profileRoleText('creator'), '创建人', 'creator 中文');
+    assert.strictEqual(profileRoleText('member'), '成员', 'member 中文');
+    assert.strictEqual(profileRoleText(undefined), '成员', '缺 role 默认为成员');
+    assert.strictEqual(profileRoleText('superuser'), 'superuser', '未知 role 原样');
+    assert.strictEqual(profileStatusText('suspended'), '已停用', 'suspended 中文');
+    assert.strictEqual(profileStatusText('retired'), '已退役', 'retired 中文');
+    assert.strictEqual(profileStatusText('active'), 'active', 'active 原样');
+    tr.setViewerLang('en');
+    assert.strictEqual(fmtUptime(3661), '1h 1m', '3661 秒英文');
+    assert.strictEqual(fmtUptime(45), '45s', '45 秒英文');
+    assert.strictEqual(nodeStateText('running'), 'Running', 'running 英文');
+    assert.strictEqual(nodeStateText('off'), 'Docked', 'off 英文');
+    assert.strictEqual(profileRoleText('admin'), 'Admin', 'admin 英文');
+    assert.strictEqual(profileStatusText('suspended'), 'Suspended', 'suspended 英文');
+    tr.setViewerLang('zh');
+    ok('fmtUptime / nodeStateText / profileRoleText / profileStatusText：双语表 + 未知原样');
+  }
+  // 18m. update-staged：checkAndStage 暂存成功即发事件；三端接线齐全。
+  {
+    const asarBytes = Buffer.from('fake-asar-bytes-v0313');
+    const asarSha = sha256Hex(asarBytes);
+    const manifest = { version: '0.3.13', asarUrl: 'https://example.invalid/app.asar', sha256: asarSha, notes: 'test' };
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'chimera-upd-staged-'));
+    try {
+      const up = new AppUpdater({
+        currentVersion: '0.3.12', userDataDir: tmp,
+        fetch: async (url) => (String(url).endsWith('/desktop-update.json')
+          ? mockResponse({ json: manifest })
+          : mockResponse({ bytes: asarBytes })),
+      });
+      const staged = new Promise((resolve) => up.once('update-staged', resolve));
+      const info = await up.checkAndStage();
+      const ev = await withTimeout(staged, 3000, 'checkAndStage 应发 update-staged');
+      assert.strictEqual(ev.version, '0.3.13', '事件应带新版本号');
+      assert.strictEqual(info.staged.ok, true, '暂存应成功');
+      assert.ok(fs.existsSync(up.pendingAsar), '暂存 asar 应存在');
+    } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+    assert.ok(mainSrc18.includes("updater.on('update-staged'"), 'main 应订阅 update-staged');
+    assert.ok(mainSrc18.includes("sendToRenderer('update:staged'"), 'main 应转发 update:staged');
+    assert.ok(preloadSrc18.includes('onUpdateStaged'), 'preload 应暴露 onUpdateStaged');
+    assert.ok(rendererSrc18.includes('window.chimera.onUpdateStaged'), 'renderer 应订阅 onUpdateStaged');
+    assert.ok(rendererSrc18.includes("$('updatePill')"), 'renderer 应操作 updatePill');
+    ok('update-staged：checkAndStage 发事件带版本 + main/preload/renderer 三端接线');
+  }
+  // 18n. ForumClient 翻译 429：单条与批量都应以 status 429 抛错；main 归一化接线。
+  {
+    const mock = await new Promise((resolve) => {
+      const server = http.createServer((req, res) => {
+        let body = '';
+        req.on('data', (c) => { body += c; });
+        req.on('end', () => {
+          res.setHeader('Content-Type', 'application/json');
+          res.writeHead(429);
+          res.end(JSON.stringify({ ok: false, error: 'translate rate limited, try again later' }));
+        });
+      });
+      server.listen(0, '127.0.0.1', () => resolve({ server, base: `http://127.0.0.1:${server.address().port}` }));
+    });
+    try {
+      const mc = new ForumClient(mock.base);
+      await assert.rejects(mc.translate('tok-abc', 'Hello', 'zh'), (e) => e.status === 429, '单条翻译 429 应抛 status 429');
+      await assert.rejects(mc.translateBatch('tok-abc', [{ text: 'Hello' }], 'zh'), (e) => e.status === 429, '批量翻译 429 应抛 status 429');
+    } finally { mock.server.close(); }
+    assert.ok(mainSrc18.includes('err.status === 429'), 'main 翻译处理器应识别 429');
+    assert.ok(mainSrc18.includes("results: (items || []).map(() => ({ error: 'rate_limited' }))"), 'main 应把批量 429 归一化为 per-item rate_limited');
+    ok('ForumClient 翻译 429：单条/批量均抛 status 429；main 归一化接线齐全');
   }
 
   console.log(`\nPASS: ${passed} 项全过`);

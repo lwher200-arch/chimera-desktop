@@ -22,12 +22,15 @@
       <button class="nav-btn" data-view="community" data-i18n="nav.community">社区</button>
       <button class="nav-btn" data-view="team" data-i18n="nav.team">团队</button>
       <button class="nav-btn" data-view="node"><span data-i18n="nav.node">节点</span> <span id="nodeNavBadge" class="node-badge off">关</span></button>
+      <button class="nav-btn hidden" id="navMoreBtn" data-i18n-title="nav.moreTitle"><span data-i18n="nav.more">更多</span> ▾</button>
     </nav>
+    <div id="navMoreMenu" class="nav-more-menu hidden"></div>
     <div class="top-right">
       <input id="globalSearchInput" type="text" placeholder="搜索帖子与消息…" title="回车搜索全站" data-i18n-ph="top.searchPh" data-i18n-title="top.searchTitle">
       <button id="themeToggle" class="btn ghost" title="切换深色 / 浅色主题">🌙 深色</button>
       <button id="langToggle" class="btn ghost" title="切换翻译目标语言">翻译：中文</button>
       <span class="status-pill"><span id="sseDot" class="dot off" title="实时连接状态" data-i18n-title="top.connStatus"></span><span id="sseText" class="muted">未连接</span></span>
+      <span id="updatePill" class="update-pill hidden" title=""></span>
       <span id="whoamiAvatar" class="avatar avatar-sm av-0 hidden">?</span>
       <span id="whoami" class="whoami-chip hidden"></span>
       <button id="logoutBtn" class="btn ghost hidden" data-i18n="top.logout">退出</button>
@@ -68,7 +71,7 @@
           <h3 data-i18n="side.boards">板块</h3>
           <div id="boardList"><p class="muted small" style="padding:0 10px" data-i18n="common.loading">加载中…</p></div>
         </div>
-        <div class="sidebar-foot muted small">v0.3.12</div>
+        <div class="sidebar-foot muted small">v0.3.13</div>
       </aside>
       <main id="main">
         <!-- 首页（简版落地页）：与网页版首页同构的精简版，完整版见论坛网页 -->

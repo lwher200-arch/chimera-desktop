@@ -18,6 +18,17 @@
   var MAX_AUTO_RETRY = 2; // 节流自动重试最多次数，之后留重试按钮
 
   var cache = new Map(); // (text + '\n' + target) -> translated
+  var TRANSLATE_CACHE_MAX = 500; // 翻译缓存上限（v0.3.13）：LRU 淘汰，防长会话内存无界增长
+  // LRU 写入：已在的先删（刷新新近度），满了先踢最旧的（Map 按插入序排）。
+  function cacheSet(key, value) {
+    if (cache.has(key)) cache.delete(key);
+    while (cache.size >= TRANSLATE_CACHE_MAX) {
+      var oldest = cache.keys().next().value;
+      if (oldest === undefined) break;
+      cache.delete(oldest);
+    }
+    cache.set(key, value);
+  }
   var texts = {}; // id -> prose（渲染成功或删框后即删；重试失败的保留）
   var retries = {}; // id -> 节流自动重试次数
   var seq = 0;
@@ -78,6 +89,9 @@
       'top.sseFallback': 'SSE 回落',
       'top.disconnected': '已断开',
       'top.sessionExpired': '会话失效，请重新登录',
+      'top.title': 'Chimera 桌面端',
+      'top.updateReady': '新版 %s 已就绪',
+      'top.updateReadyTitle': '新版已下载暂存，下次启动时生效，点击隐藏',
       'top.netPublic': '（公网）',
       'top.netTail': '（尾网）',
       'nav.home': '首页',
@@ -89,6 +103,8 @@
       'nav.node': '节点',
       'nav.nodeOn': '开',
       'nav.nodeOff': '关',
+      'nav.more': '更多',
+      'nav.moreTitle': '更多导航',
       'login.title': '登录奇美拉',
       'login.tag': '人 + AI 的混合社区 · 狮子、山羊与蛇，同守一颗水晶星',
       'login.featChat': '💬 实时会话',
@@ -101,6 +117,14 @@
       'login.hint': '密码只用于本次登录换会话，不存本地。还没有账号？先在论坛网页版注册：forum.coldhao.win',
       'login.emptyErr': '请填写用户名和密码',
       'login.failErr': '登录失败：',
+      'err.loginNoSession': '服务端未返回会话',
+      'err.needLogin': '请先登录人类账号',
+      'err.bindNoChallenge': '缺少挑战串',
+      'err.bindAlreadyBound': '已绑定工作区，请先解绑再重绑',
+      'err.doRegisterFailed': '注册公钥到信任层失败：%s',
+      'err.nodeAlreadyActivated': '节点已激活过，无需重复激活',
+      'err.nodeActivateNoAccount': '服务端未返回节点账号',
+      'err.nodeTokenOutsideDir': '节点 token 文件不在节点数据目录内，拒绝启动：%s',
       'side.conv': '会话',
       'side.boards': '板块',
       'side.searchPh': '搜索群组 / 好友',
@@ -262,6 +286,11 @@
       'profile.human': '人类',
       'profile.ai': 'AI',
       'profile.node': '节点',
+      'profile.roleAdmin': '管理员',
+      'profile.roleMember': '成员',
+      'profile.roleCreator': '创建人',
+      'profile.statusSuspended': '已停用',
+      'profile.statusRetired': '已退役',
       'profile.points': '%s 分',
       'profile.lastActive': ' · 最近活跃 ',
       'profile.strengths': '擅长：',
@@ -288,6 +317,11 @@
       'node.stopping': '漂流站点停止中…',
       'node.error': '漂流站点出错：',
       'node.docked': '漂流站点已停靠',
+      'node.stateRunning': '运行中',
+      'node.stateStarting': '启动中',
+      'node.stateStopping': '停止中',
+      'node.stateError': '出错',
+      'node.stateOff': '已停靠',
       'node.subOff': '开启后成为一个漂流站点：同步并上传脱敏的哈希与元数据，随时可停',
       'node.syncUpload': '同步 + 上传',
       'node.desensitized': '脱敏同步',
@@ -356,6 +390,9 @@
       'community.switchTeam': '切换团队',
       'node.countItems': '%s 条',
       'node.countTimes': '%s 次',
+      'node.uptimeHours': '%s 小时 %s 分',
+      'node.uptimeMins': '%s 分 %s 秒',
+      'node.uptimeSecs': '%s 秒',
       'common.listSep': '、',
     },
     en: {
@@ -378,6 +415,9 @@
       'top.sseFallback': 'SSE fallback',
       'top.disconnected': 'Disconnected',
       'top.sessionExpired': 'Session expired — please log in again',
+      'top.title': 'Chimera Desktop',
+      'top.updateReady': 'Update %s ready',
+      'top.updateReadyTitle': 'The update is downloaded and staged; it applies on next launch. Click to dismiss',
       'top.netPublic': ' (public)',
       'top.netTail': ' (tailnet)',
       'nav.home': 'Home',
@@ -389,6 +429,8 @@
       'nav.node': 'Node',
       'nav.nodeOn': 'On',
       'nav.nodeOff': 'Off',
+      'nav.more': 'More',
+      'nav.moreTitle': 'More navigation',
       'login.title': 'Log in to Chimera',
       'login.tag': 'A mixed community of humans + AI · the lion, the goat and the serpent guard one crystal star',
       'login.featChat': '💬 Live chats',
@@ -401,6 +443,14 @@
       'login.hint': 'Your password is only used to trade for a session this time and is never stored locally. No account yet? Register on the forum website: forum.coldhao.win',
       'login.emptyErr': 'Please enter your username and password',
       'login.failErr': 'Login failed: ',
+      'err.loginNoSession': 'The server did not return a session',
+      'err.needLogin': 'Please log in with a human account first',
+      'err.bindNoChallenge': 'Missing challenge string',
+      'err.bindAlreadyBound': 'Workspace already bound — unlink it first, then bind again',
+      'err.doRegisterFailed': 'Failed to register the public key with the trust layer: %s',
+      'err.nodeAlreadyActivated': 'The node is already activated',
+      'err.nodeActivateNoAccount': 'The server did not return a node account',
+      'err.nodeTokenOutsideDir': 'The node token file is outside the node data directory; refusing to start: %s',
       'side.conv': 'Chats',
       'side.boards': 'Boards',
       'side.searchPh': 'Search groups / friends',
@@ -562,6 +612,11 @@
       'profile.human': 'Human',
       'profile.ai': 'AI',
       'profile.node': 'Node',
+      'profile.roleAdmin': 'Admin',
+      'profile.roleMember': 'Member',
+      'profile.roleCreator': 'Creator',
+      'profile.statusSuspended': 'Suspended',
+      'profile.statusRetired': 'Retired',
       'profile.points': '%s pts',
       'profile.lastActive': ' · Last active ',
       'profile.strengths': 'Strengths: ',
@@ -588,6 +643,11 @@
       'node.stopping': 'Drift site stopping…',
       'node.error': 'Drift site error: ',
       'node.docked': 'Drift site docked',
+      'node.stateRunning': 'Running',
+      'node.stateStarting': 'Starting',
+      'node.stateStopping': 'Stopping',
+      'node.stateError': 'Error',
+      'node.stateOff': 'Docked',
       'node.subOff': 'Turn it on to become a drift site: sync and upload desensitized hashes and metadata, stop anytime.',
       'node.syncUpload': 'Sync + upload',
       'node.desensitized': 'Desensitized sync',
@@ -656,6 +716,9 @@
       'community.switchTeam': 'Switch team',
       'node.countItems': '%s items',
       'node.countTimes': '%s times',
+      'node.uptimeHours': '%sh %sm',
+      'node.uptimeMins': '%sm %ss',
+      'node.uptimeSecs': '%ss',
       'common.listSep': ', ',
     },
   };
@@ -852,12 +915,44 @@
     else renderTranslated(job.box, text, out);
   }
   function renderFail(job, target) {
-    if (job.kind === 'name') { markNameDone(job, target); return; }
+    if (job.kind === 'name') {
+      // 名字失败不清 trJobId（v0.3.13）：job 还在 texts 里、节流重试定时器
+      // 还能按 id 找到它重入队；observeNameTranslations 也不会给同一元素
+      // 重复建 job。成功时 markNameDone 才清。
+      return;
+    }
     renderRetry(job.box, job.id);
   }
   function renderSame(job, target) {
     if (job.kind === 'name') { markNameDone(job, target); return; }
     if (job.box.remove) job.box.remove();
+  }
+
+  // 429 是不是“可自动重试”：batchFn 抛错时整批都按这个判。
+  // err.status 是主进程透传的 HTTP 状态（ForumApiError.status）；IPC 丢
+  // status 时退到消息文本（'HTTP 429' 或服务端 'rate limited' 原话）。
+  function isRateLimitError(err) {
+    if (!err) return false;
+    if (err.status === 429) return true;
+    return /429|rate.?limited/i.test(String(err.message || err));
+  }
+  // 节流自动延迟重试：重试最多 MAX_AUTO_RETRY 次，之后留重试按钮
+  // （名字类无重试按钮，次数用完后 renderFail 只留原文、job id 保留）。
+  function scheduleRateLimitRetry(job, target) {
+    var n = (retries[job.id] || 0) + 1;
+    retries[job.id] = n;
+    if (n <= MAX_AUTO_RETRY) {
+      (function (box, id, kind) {
+        setTimeout(function () {
+          if (!texts[id]) return; // 已渲染/已删框：不用再试
+          if (typeof document !== 'undefined' && document.contains && !document.contains(box)) return;
+          enqueue(box, id, true, kind);
+        }, RETRY_DELAY_MS);
+      })(job.box, job.id, job.kind);
+    } else {
+      delete retries[job.id];
+      renderFail(job, target);
+    }
   }
 
   function flush() {
@@ -871,6 +966,7 @@
       if (!text) { delete queuedIds[job.id]; clearNameJob(job); return; }
       var hit = cache.get(text + '\n' + target);
       if (hit !== undefined) {
+        cacheSet(text + '\n' + target, hit); // 命中也刷新新近度（LRU）
         renderJob(job, text, hit, target);
         delete queuedIds[job.id];
         delete texts[job.id];
@@ -918,13 +1014,13 @@
             renderSame(job, target);
             // 名字类 same 也进缓存（原文即译文）：下次名字 pass 再入队时走缓存命中，
             // 不再调接口。正文框不缓存——缓存会把“应静默删框”变成无意义的切换框。
-            if (job.kind === 'name') cache.set(text + '\n' + target, text);
+            if (job.kind === 'name') cacheSet(text + '\n' + target, text);
             delete texts[job.id];
           } else if (r.translated === text) {
             // 服务端漏网的回显：不渲染、不缓存，走重试（名字类无重试按钮，记已完成）
             renderFail(job, target);
           } else {
-            cache.set(text + '\n' + target, r.translated);
+            cacheSet(text + '\n' + target, r.translated);
             renderJob(job, text, r.translated, target);
             delete texts[job.id];
           }
@@ -934,30 +1030,21 @@
           delete texts[job.id];
         } else if (r.error === 'rate_limited') {
           // 节流：自动延迟重试，不用用户点按钮；重试最多 2 次，之后留重试按钮。
-          var n = (retries[job.id] || 0) + 1;
-          retries[job.id] = n;
-          if (n <= MAX_AUTO_RETRY) {
-            (function (box, id, kind) {
-              setTimeout(function () {
-                if (!texts[id]) return; // 已渲染/已删框：不用再试
-                if (typeof document !== 'undefined' && document.contains && !document.contains(box)) return;
-                enqueue(box, id, true, kind);
-              }, RETRY_DELAY_MS);
-            })(job.box, job.id, job.kind);
-          } else {
-            delete retries[job.id];
-            renderFail(job, target);
-          }
+          scheduleRateLimitRetry(job, target);
         } else {
           renderFail(job, target); // 429 / 上游失败：留原文+重试按钮，文本保留
         }
       });
       if (queue.length) flush();
-    }).catch(function () {
+    }).catch(function (err) {
       inFlight--;
       todo.forEach(function (job) {
         delete queuedIds[job.id];
-        renderFail(job, target); // 网络失败同样留重试按钮，文本保留
+        // 整批抛错：429（服务端 HTTP 429）按节流走 65 秒自动重试；
+        // 网络失败等其他错留重试按钮，文本保留。401 走主进程的登出
+        // 流程（会话失效回登录页），这里不另行处理。
+        if (isRateLimitError(err)) scheduleRateLimitRetry(job, target);
+        else renderFail(job, target);
       });
       if (queue.length) flush();
     });
@@ -1023,6 +1110,8 @@
     init: init,
     _handleClick: handleClick,
     _cacheSize: function () { return cache.size; },
+    _cacheMax: function () { return TRANSLATE_CACHE_MAX; },
+    _isRateLimitError: isRateLimitError,
     _setRetryDelayMs: function (ms) { if (typeof ms === 'number' && ms > 0) RETRY_DELAY_MS = ms; },
     _resetForTest: function () {
       cache.clear(); texts = {}; retries = {}; queue = []; queuedIds = {};

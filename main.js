@@ -90,6 +90,47 @@ function sessionToken() {
   return decToken(s.encToken);
 }
 
+// 错误码（v0.3.13）：IPC 只透传 message，code 嵌在消息里供渲染层翻译；
+// 格式 ERR_CODE 或 ERR_CODE: 细节。未知错误不走这里，原样抛。
+function codedError(code, detail) {
+  const e = new Error(detail ? `${code}: ${detail}` : code);
+  e.code = code;
+  return e;
+}
+
+// 会话过期（v0.3.13）：REST 层遇 401 即清会话、回登录页。
+// onSessionExpired 只推一次 session:expired（登录/登出后复位），
+// 再把实时流重启为匿名；渲染层收到事件后调 resetToLogin()。
+let sessionExpiredNotified = false;
+
+function onSessionExpired() {
+  if (store.state.session) store.update((s) => { s.session = null; });
+  stopWorkspaceSeenTimer();
+  if (!sessionExpiredNotified) {
+    sessionExpiredNotified = true;
+    sendToRenderer('session:expired', {});
+  }
+  startRealtime(); // 退回匿名流
+}
+
+// guardApi 包一层 api 处理器：401 时先触发 onSessionExpired() 再原样抛错。
+// 公共免 token 接口（health/leaderboard/accounts/boards）不包——
+// 它们本来就不要 token，401 与会话无关。
+function guardApi(fn) {
+  return async (...args) => {
+    try {
+      return await fn(...args);
+    } catch (err) {
+      if (err && err.status === 401) onSessionExpired();
+      throw err;
+    }
+  };
+}
+
+function apiHandle(channel, fn) {
+  ipcMain.handle(channel, guardApi(fn));
+}
+
 function createWindow() {
   const w = store.state.prefs.window || { width: 1180, height: 760 };
   win = new BrowserWindow({
@@ -154,6 +195,7 @@ function startRealtime() {
   });
   realtime.on('session-expired', ({ reason }) => {
     console.log('[realtime] session expired:', reason);
+    onSessionExpired();
   });
   realtime.on('truncated', (data) => sendToRenderer('sse:truncated', data));
   realtime.on('event', ({ event, data, seq }) => sendToRenderer('sse:event', { event, data, seq }));
@@ -214,7 +256,7 @@ function registerIpc() {
 
   ipcMain.handle('auth:login', async (_e, { username, password }) => {
     const data = await client.humanLogin(username, password);
-    if (!data || !data.sessionToken) throw new Error('登录失败：服务端未返回会话');
+    if (!data || !data.sessionToken) throw codedError('ERR_LOGIN_NO_SESSION');
     store.update((s) => {
       s.session = {
         username: data.username || username,
@@ -222,6 +264,7 @@ function registerIpc() {
         expiresAt: Date.now() + 7 * 24 * 3600 * 1000,
       };
     });
+    sessionExpiredNotified = false; // 新会话：过期通知复位
     startRealtime();
     return { username: data.username || username };
   });
@@ -230,75 +273,91 @@ function registerIpc() {
     const token = sessionToken();
     if (token) { try { await client.humanLogout(token); } catch {} }
     store.update((s) => { s.session = null; });
+    sessionExpiredNotified = false; // 已登出：过期通知复位
     startRealtime(); // 退回匿名流
     return true;
   });
 
   ipcMain.handle('api:health', () => client.getHealth());
   ipcMain.handle('api:leaderboard', (_e, limit) => client.getLeaderboard(limit || 20));
-  ipcMain.handle('api:me', () => client.getMe(sessionToken()));
+  apiHandle('api:me', () => client.getMe(sessionToken()));
   ipcMain.handle('api:accounts', () => client.getAccounts());
-  ipcMain.handle('api:groups', () => client.getGroups(sessionToken()));
-  ipcMain.handle('api:group-messages', (_e, { groupId, since, limit, before_id }) =>
+  apiHandle('api:groups', () => client.getGroups(sessionToken()));
+  apiHandle('api:group-messages', (_e, { groupId, since, limit, before_id }) =>
     client.getGroupMessages(groupId, sessionToken(), { since, limit, before_id }));
-  ipcMain.handle('api:send-group-message', (_e, { groupId, body, attachments }) =>
+  apiHandle('api:send-group-message', (_e, { groupId, body, attachments }) =>
     client.sendGroupMessage(groupId, sessionToken(), body, attachments || []));
-  ipcMain.handle('api:read', (_e, { groupId, seq }) =>
+  apiHandle('api:read', (_e, { groupId, seq }) =>
     client.markGroupRead(sessionToken(), groupId, seq));
-  ipcMain.handle('api:dms', () => client.getDms(sessionToken()));
-  ipcMain.handle('api:dm-history', (_e, { peer, since, limit, before_id }) =>
+  apiHandle('api:dms', () => client.getDms(sessionToken()));
+  apiHandle('api:dm-history', (_e, { peer, since, limit, before_id }) =>
     client.getDmHistory(peer, sessionToken(), { since, limit, before_id }));
-  ipcMain.handle('api:send-dm', (_e, { peer, body, attachments }) =>
+  apiHandle('api:send-dm', (_e, { peer, body, attachments }) =>
     client.sendDm(peer, sessionToken(), body, attachments || []));
-  ipcMain.handle('api:posts', (_e, opts) => client.getPosts(sessionToken(), opts || {}));
+  apiHandle('api:posts', (_e, opts) => client.getPosts(sessionToken(), opts || {}));
   // 翻译（v0.3.1）：单条 + 批量，走 /api/translate（带 session token）。
-  ipcMain.handle('api:translate', (_e, { text, target, source }) =>
-    client.translate(sessionToken(), text, target, source || null));
-  ipcMain.handle('api:translate-batch', (_e, { items, target }) =>
-    client.translateBatch(sessionToken(), items, target));
+  // 429 归一化（v0.3.13）：服务端单条限流回 HTTP 429、批量回 200+rate_limited；
+  // 渲染层只认 per-item rate_limited（65 秒自动重试），这里把 HTTP 429
+  // 也折成同样形状，渲染层不用分两路。
+  apiHandle('api:translate', async (_e, { text, target, source }) => {
+    try {
+      return await client.translate(sessionToken(), text, target, source || null);
+    } catch (err) {
+      if (err && err.status === 429) return { ok: false, error: 'rate_limited' };
+      throw err;
+    }
+  });
+  apiHandle('api:translate-batch', async (_e, { items, target }) => {
+    try {
+      return await client.translateBatch(sessionToken(), items, target);
+    } catch (err) {
+      if (err && err.status === 429) return { ok: true, results: (items || []).map(() => ({ error: 'rate_limited' })) };
+      throw err;
+    }
+  });
   // 板块常驻（v0.3.1）：直接取全部板块，不再等帖子拉回来。
   ipcMain.handle('api:boards', () => client.getBoards());
   // 社区 / 团队（v0.3.1，只读）。
-  ipcMain.handle('api:communities', () => client.getCommunities(sessionToken()));
-  ipcMain.handle('api:community', (_e, { id }) => client.getCommunity(sessionToken(), id));
-  ipcMain.handle('api:community-ledger', (_e, { id, limit }) =>
+  apiHandle('api:communities', () => client.getCommunities(sessionToken()));
+  apiHandle('api:community', (_e, { id }) => client.getCommunity(sessionToken(), id));
+  apiHandle('api:community-ledger', (_e, { id, limit }) =>
     client.getCommunityLedger(sessionToken(), id, { limit }));
   // 社区 / 团队（v0.3.4，可交互）：服务端按创建人/站长/admin/成员放行，失败原样抛错、渲染进程展示原话。
-  ipcMain.handle('api:create-community', (_e, { name, title, description }) =>
+  apiHandle('api:create-community', (_e, { name, title, description }) =>
     client.createCommunity(sessionToken(), { name, title, description }));
-  ipcMain.handle('api:join-community-code', (_e, { code }) =>
+  apiHandle('api:join-community-code', (_e, { code }) =>
     client.joinCommunityByCode(sessionToken(), code));
-  ipcMain.handle('api:community-posts', (_e, { id, limit, q }) =>
+  apiHandle('api:community-posts', (_e, { id, limit, q }) =>
     client.getCommunityPosts(sessionToken(), id, { limit, q }));
-  ipcMain.handle('api:create-community-post', (_e, { id, title, body }) =>
+  apiHandle('api:create-community-post', (_e, { id, title, body }) =>
     client.createCommunityPost(sessionToken(), id, { title, body }));
-  ipcMain.handle('api:create-community-announcement', (_e, { id, body }) =>
+  apiHandle('api:create-community-announcement', (_e, { id, body }) =>
     client.createCommunityAnnouncement(sessionToken(), id, body));
-  ipcMain.handle('api:delete-community-announcement', (_e, { id, annId }) =>
+  apiHandle('api:delete-community-announcement', (_e, { id, annId }) =>
     client.deleteCommunityAnnouncement(sessionToken(), id, annId));
-  ipcMain.handle('api:add-community-member', (_e, { id, name, type }) =>
+  apiHandle('api:add-community-member', (_e, { id, name, type }) =>
     client.addCommunityMember(sessionToken(), id, { name, type }));
-  ipcMain.handle('api:remove-community-member', (_e, { id, name }) =>
+  apiHandle('api:remove-community-member', (_e, { id, name }) =>
     client.removeCommunityMember(sessionToken(), id, name));
-  ipcMain.handle('api:set-community-member-role', (_e, { id, name, role }) =>
+  apiHandle('api:set-community-member-role', (_e, { id, name, role }) =>
     client.setCommunityMemberRole(sessionToken(), id, name, role));
-  ipcMain.handle('api:set-community-groups', (_e, { id, groups }) =>
+  apiHandle('api:set-community-groups', (_e, { id, groups }) =>
     client.setCommunityGroups(sessionToken(), id, groups));
   // 帖子互动（v0.3.4）：点赞 / 置顶 / 删帖 + 回复（createPost 已有，reply_to 继承 team_id）。
-  ipcMain.handle('api:create-post', (_e, { board, title, body, replyTo }) =>
+  apiHandle('api:create-post', (_e, { board, title, body, replyTo }) =>
     client.createPost(sessionToken(), { board, title, body, replyTo }));
-  ipcMain.handle('api:like-post', (_e, { id }) => client.likePost(sessionToken(), id));
-  ipcMain.handle('api:pin-post', (_e, { id, pinned }) => client.pinPost(sessionToken(), id, pinned));
-  ipcMain.handle('api:delete-post', (_e, { id }) => client.deletePost(sessionToken(), id));
+  apiHandle('api:like-post', (_e, { id }) => client.likePost(sessionToken(), id));
+  apiHandle('api:pin-post', (_e, { id, pinned }) => client.pinPost(sessionToken(), id, pinned));
+  apiHandle('api:delete-post', (_e, { id }) => client.deletePost(sessionToken(), id));
   // v0.3.5：全站搜索 / 关注 / 关注动态 / 改自己资料。
-  ipcMain.handle('api:search', (_e, { q, limit }) => client.search(sessionToken(), q, limit || 20));
-  ipcMain.handle('api:follow', (_e, { name }) => client.getFollow(sessionToken(), name));
-  ipcMain.handle('api:toggle-follow', (_e, { name }) => client.toggleFollow(sessionToken(), name));
-  ipcMain.handle('api:following-feed', (_e, { limit, before_id }) => client.getFollowingFeed(sessionToken(), { limit, before_id }));
-  ipcMain.handle('api:update-me', (_e, { patch }) => client.updateMe(sessionToken(), patch));
+  apiHandle('api:search', (_e, { q, limit }) => client.search(sessionToken(), q, limit || 20));
+  apiHandle('api:follow', (_e, { name }) => client.getFollow(sessionToken(), name));
+  apiHandle('api:toggle-follow', (_e, { name }) => client.toggleFollow(sessionToken(), name));
+  apiHandle('api:following-feed', (_e, { limit, before_id }) => client.getFollowingFeed(sessionToken(), { limit, before_id }));
+  apiHandle('api:update-me', (_e, { patch }) => client.updateMe(sessionToken(), patch));
   // ---- 工作区绑定（融合 P0）：登记 + 只读在线状态 ----
   // api:workspace-challenge：取一次性挑战（5 分钟过期）。
-  ipcMain.handle('api:workspace-challenge', () => client.workspaceChallenge(sessionToken()));
+  apiHandle('api:workspace-challenge', () => client.workspaceChallenge(sessionToken()));
   // api:workspace-bind：challenge → 本机签名 → 注册，全程在主进程完成
   // （私钥只在主进程读，渲染进程拿不到私钥与签名原文）。
   // 渲染进程只传 challenge；keyId/公钥/设备名由本机密钥派生。
@@ -312,17 +371,17 @@ function registerIpc() {
   //  - 论坛注册失败 → 尽力吊销刚注册的 DO 新 key（无任何行引用，
   //    安全），再恢复旧 keypair。旧 DO key 由 registrar 下一轮按
   //    guard 规则自动吊销（旧 keyId 不再有活跃行引用），registrar 不用改。
-  ipcMain.handle('api:workspace-bind', async (_e, { challenge } = {}) => {
+  apiHandle('api:workspace-bind', async (_e, { challenge } = {}) => {
     const token = sessionToken();
-    if (!token) throw new Error('请先登录人类账号，再绑定工作区');
-    if (!challenge) throw new Error('绑定失败：缺少挑战串');
+    if (!token) throw codedError('ERR_NEED_LOGIN');
+    if (!challenge) throw codedError('ERR_BIND_NO_CHALLENGE');
     let rotated = null;
     let keyInfo = null;
     try {
       const mine = await client.myWorkspaceBindings(token);
       const rows = (mine && mine.bindings) || [];
       const active = rows.find((b) => !b.unlinkedTs);
-      if (active) throw new Error('已绑定工作区，请先解绑再重绑');
+      if (active) throw codedError('ERR_BIND_ALREADY_BOUND');
       const hasPriorRows = rows.length > 0;
       const hasKeyPair = workspaceBinding.keyPairExists();
       if (workspaceBinding.shouldRotateKeyPair({ hasPriorRows, hasKeyPair })) {
@@ -336,7 +395,7 @@ function registerIpc() {
           nodeId: keyInfo.nodeId, keyId: keyInfo.keyId, publicKey: keyInfo.publicKey,
         });
       } catch (doErr) {
-        throw new Error('注册公钥到信任层失败：' + (doErr.message || doErr));
+        throw codedError('ERR_DO_REGISTER_FAILED', doErr.message || doErr);
       }
       const signature = workspaceBinding.signChallenge(
         challenge, workspaceBinding.readPrivateKeyPem());
@@ -369,7 +428,7 @@ function registerIpc() {
     }
   });
   // api:workspace-bindings：本人全部行（含已解绑）；有活跃绑定时起 seen 定时器。
-  ipcMain.handle('api:workspace-bindings', async () => {
+  apiHandle('api:workspace-bindings', async () => {
     const data = await client.myWorkspaceBindings(sessionToken());
     const active = (data && data.bindings || []).find((b) => !b.unlinkedTs);
     if (active) {
@@ -383,19 +442,19 @@ function registerIpc() {
   // api:workspace-unlink：解绑（P0 不做解绑按钮，验收走 API；留接口供后续接线）。
   // 服务端置 unlinkedTs、registryStatus=revoked-pending；DO 吊销由
   // registrar 每小时按 guard 规则自动处理（无活跃行引用时才吊）。
-  ipcMain.handle('api:workspace-unlink', async (_e, { id } = {}) => {
+  apiHandle('api:workspace-unlink', async (_e, { id } = {}) => {
     const data = await client.unlinkWorkspaceBinding(sessionToken(), id);
     if (id && workspaceActiveBindingId === id) stopWorkspaceSeenTimer();
     return data;
   });
   // api:workspace-seen：手动打一次 lastSeen（定时器在主进程另跑）。
-  ipcMain.handle('api:workspace-seen', (_e, { id } = {}) =>
+  apiHandle('api:workspace-seen', (_e, { id } = {}) =>
     client.workspaceSeen(sessionToken(), id));
   // 加群（v0.3.2）：调 /join 自加（服务端按调用方身份加人）；服务端不放行时原样抛错，渲染进程展示原话。
-  ipcMain.handle('api:join-group', (_e, { groupId }) =>
+  apiHandle('api:join-group', (_e, { groupId }) =>
     client.joinGroup(sessionToken(), groupId));
-  ipcMain.handle('api:upload', (_e, { filePath }) => client.uploadFile(sessionToken(), filePath));
-  ipcMain.handle('api:upload-blob', async (_e, { name, base64 }) => {
+  apiHandle('api:upload', (_e, { filePath }) => client.uploadFile(sessionToken(), filePath));
+  apiHandle('api:upload-blob', async (_e, { name, base64 }) => {
     // 粘贴图片 / 文件选择器拿到的 File 只有内存数据，没有磁盘路径：
     // 先写进临时文件再走同一套 multipart 上传，传完即删。
     const os = require('os');
@@ -438,10 +497,10 @@ function registerIpc() {
   // 时不重复激活。运行中的节点管理器立即用上新 token（下次上传即生效）。
   ipcMain.handle('node:activate', async () => {
     const token = sessionToken();
-    if (!token) throw new Error('请先登录人类账号，再激活节点');
-    if (nodeManager && nodeManager._readForumToken()) throw new Error('节点已激活过，无需重复激活');
+    if (!token) throw codedError('ERR_NEED_LOGIN');
+    if (nodeManager && nodeManager._readForumToken()) throw codedError('ERR_NODE_ALREADY_ACTIVATED');
     const data = await client.activateNode(token);
-    if (!data || !data.apiToken || !data.account || !data.account.name) throw new Error('激活失败：服务端未返回节点账号');
+    if (!data || !data.apiToken || !data.account || !data.account.name) throw codedError('ERR_NODE_ACTIVATE_NO_ACCOUNT');
     const fs = require('fs');
     const nodeDir = userDataFile('node');
     fs.mkdirSync(nodeDir, { recursive: true });
@@ -489,6 +548,8 @@ if (!gotSingleInstanceLock) {
   registerIpc();
   startRealtime();
   updater.startPeriodicCheck(); // 启动 15 秒后查一次，之后每 6 小时查一次
+  // 更新已暂存（v0.3.13）：推给渲染进程顶栏提示，不弹窗、不打断。
+  updater.on('update-staged', ({ version }) => sendToRenderer('update:staged', { version }));
   await initNode();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

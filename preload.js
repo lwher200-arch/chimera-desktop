@@ -82,6 +82,10 @@ contextBridge.exposeInMainWorld('chimera', {
   // 传输状态指示器（v0.2.1）：{state, detail}，state ∈ connecting | ws |
   // sse | disconnected | session-expired。渲染进程只按这个画指示器。
   onRealtimeTransport: (fn) => ipcRenderer.on('realtime:transport', (_e, payload) => fn(payload)),
+  // 会话过期（v0.3.13）：主进程 401 判定后推 session:expired，渲染进程回登录页。
+  onSessionExpired: (fn) => ipcRenderer.on('session:expired', (_e, payload) => fn(payload)),
+  // 更新已暂存（v0.3.13）：{version}，渲染进程顶栏提示。
+  onUpdateStaged: (fn) => ipcRenderer.on('update:staged', (_e, payload) => fn(payload)),
   onNodeState: (fn) => ipcRenderer.on('node:state', (_e, payload) => fn(payload)),
   onNodeLog: (fn) => ipcRenderer.on('node:log', (_e, line) => fn(line)),
   onNodeSync: (fn) => ipcRenderer.on('node:sync', (_e, status) => fn(status)),
