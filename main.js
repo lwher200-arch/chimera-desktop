@@ -22,6 +22,7 @@ const { NodeManager } = require('./lib/nodeManager');
 const { ServerResolver, PRIMARY_BASE } = require('./lib/serverResolver');
 const { AppUpdater } = require('./lib/appUpdater');
 const workspaceBinding = require('./lib/workspaceBinding');
+const doRegistry = require('./lib/doRegistry');
 const os = require('node:os');
 
 const API_BASE = process.env.CHIMERA_API_BASE || PRIMARY_BASE;
@@ -302,25 +303,70 @@ function registerIpc() {
   // （私钥只在主进程读，渲染进程拿不到私钥与签名原文）。
   // 渲染进程只传 challenge；keyId/公钥/设备名由本机密钥派生。
   // 设备名默认 os.hostname()，P0 不做改名 UI。
+  // v0.3.11 重绑发新 keypair：顺序是 DO 注册在先、论坛注册行在后——
+  //  - 已有活跃绑定时直接拒绝（须先解绑再重绑，避免重复活跃行）；
+  //  - 有过绑定行且本机有旧 keypair 时归档旧 key、生成新 keypair；
+  //    无行但有 keypair（之前某次绑定中途失败）时复用旧 key（它可能
+  //    已在 DO 里，复用可避免在 DO 里留孤 key）；
+  //  - DO 注册失败 → 恢复旧 keypair，中止（论坛一行不动）；
+  //  - 论坛注册失败 → 尽力吊销刚注册的 DO 新 key（无任何行引用，
+  //    安全），再恢复旧 keypair。旧 DO key 由 registrar 下一轮按
+  //    guard 规则自动吊销（旧 keyId 不再有活跃行引用），registrar 不用改。
   ipcMain.handle('api:workspace-bind', async (_e, { challenge } = {}) => {
     const token = sessionToken();
     if (!token) throw new Error('请先登录人类账号，再绑定工作区');
     if (!challenge) throw new Error('绑定失败：缺少挑战串');
-    const { keyId, publicKey } = workspaceBinding.ensureKeyPair();
-    const signature = workspaceBinding.signChallenge(
-      challenge, workspaceBinding.readPrivateKeyPem());
-    const data = await client.registerWorkspaceBinding(token, {
-      keyId,
-      publicKey,
-      deviceName: workspaceBinding.sanitizeDeviceName(os.hostname()),
-      challenge,
-      signature,
-    });
-    if (data && data.binding && data.binding.id) {
-      workspaceActiveBindingId = data.binding.id;
-      startWorkspaceSeenTimer();
+    let rotated = null;
+    let keyInfo = null;
+    try {
+      const mine = await client.myWorkspaceBindings(token);
+      const rows = (mine && mine.bindings) || [];
+      const active = rows.find((b) => !b.unlinkedTs);
+      if (active) throw new Error('已绑定工作区，请先解绑再重绑');
+      const hasPriorRows = rows.length > 0;
+      const hasKeyPair = workspaceBinding.keyPairExists();
+      if (workspaceBinding.shouldRotateKeyPair({ hasPriorRows, hasKeyPair })) {
+        rotated = workspaceBinding.archiveKeyPair();
+        keyInfo = workspaceBinding.generateFreshKeyPair();
+      } else {
+        keyInfo = workspaceBinding.ensureKeyPair();
+      }
+      try {
+        await doRegistry.registerWorkspaceKey({
+          nodeId: keyInfo.nodeId, keyId: keyInfo.keyId, publicKey: keyInfo.publicKey,
+        });
+      } catch (doErr) {
+        throw new Error('注册公钥到信任层失败：' + (doErr.message || doErr));
+      }
+      const signature = workspaceBinding.signChallenge(
+        challenge, workspaceBinding.readPrivateKeyPem());
+      let data;
+      try {
+        data = await client.registerWorkspaceBinding(token, {
+          keyId: keyInfo.keyId,
+          publicKey: keyInfo.publicKey,
+          deviceName: workspaceBinding.sanitizeDeviceName(os.hostname()),
+          challenge,
+          signature,
+        });
+      } catch (forumErr) {
+        // 论坛注册失败：新 key 只在 DO 里、无任何行引用，尽力吊销回滚。
+        try { await doRegistry.revokeWorkspaceKey(keyInfo.nodeId); } catch { /* 回滚吊销失败不掩盖原错 */ }
+        throw forumErr;
+      }
+      if (data && data.binding && data.binding.id) {
+        workspaceActiveBindingId = data.binding.id;
+        startWorkspaceSeenTimer();
+      }
+      return data;
+    } catch (err) {
+      // 回滚只恢复旧 keypair：论坛注册失败时 DO 新 key 已在内联分支尽力
+      // 吊销过；论坛行已建后（此处之后无可抛步骤）绝不能再吊 DO key。
+      if (rotated) {
+        try { workspaceBinding.restoreKeyPair(rotated); } catch { /* 恢复失败不掩盖原错 */ }
+      }
+      throw err;
     }
-    return data;
   });
   // api:workspace-bindings：本人全部行（含已解绑）；有活跃绑定时起 seen 定时器。
   ipcMain.handle('api:workspace-bindings', async () => {
@@ -335,7 +381,8 @@ function registerIpc() {
     return data;
   });
   // api:workspace-unlink：解绑（P0 不做解绑按钮，验收走 API；留接口供后续接线）。
-  // 服务端置 unlinkedTs、registryStatus=revoked-pending；DO 吊销待 Owner 供 setup token。
+  // 服务端置 unlinkedTs、registryStatus=revoked-pending；DO 吊销由
+  // registrar 每小时按 guard 规则自动处理（无活跃行引用时才吊）。
   ipcMain.handle('api:workspace-unlink', async (_e, { id } = {}) => {
     const data = await client.unlinkWorkspaceBinding(sessionToken(), id);
     if (id && workspaceActiveBindingId === id) stopWorkspaceSeenTimer();

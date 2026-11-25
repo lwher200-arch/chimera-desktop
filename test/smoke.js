@@ -3330,6 +3330,136 @@ async function main() {
     ok('主进程：token 路径按 userData 派生，不读存量路径');
   }
 
+  console.log('== 16. 重绑发新 keypair（v0.3.11）==');
+  // 16a. 轮换三件套：归档 0600 + 新 keypair 指纹变了 + 恢复回旧 key。
+  {
+    const tmp16 = fs.mkdtempSync(path.join(os.tmpdir(), 'chimera-wsrotate-'));
+    try {
+      const first = wb.ensureKeyPair({ dir: tmp16 });
+      assert.strictEqual(wb.keyPairExists({ dir: tmp16 }), true, '生成后 keyPairExists 应为真');
+      assert.strictEqual(wb.shouldRotateKeyPair({ hasPriorRows: true, hasKeyPair: true }), true, '有行且有 key 应轮换');
+      assert.strictEqual(wb.shouldRotateKeyPair({ hasPriorRows: true, hasKeyPair: false }), false, '有行无 key 不轮换（ensure 会新建）');
+      assert.strictEqual(wb.shouldRotateKeyPair({ hasPriorRows: false, hasKeyPair: true }), false, '无行有 key 不轮换（复用，避免 DO 留孤 key）');
+      assert.strictEqual(wb.shouldRotateKeyPair({ hasPriorRows: false, hasKeyPair: false }), false, '无行无 key 不轮换');
+      const backup = wb.archiveKeyPair({ dir: tmp16 });
+      assert.strictEqual(backup.archived, true, '有 key 时归档应成功');
+      assert.strictEqual(backup.oldKeyId, first.keyId, '归档的 oldKeyId 应为原 keyId');
+      assert.strictEqual(fs.statSync(backup.backupPrivate).mode & 0o777, 0o600, '归档私钥应为 0600');
+      assert.ok(fs.existsSync(backup.backupPublic), '归档公钥应存在');
+      const fresh = wb.generateFreshKeyPair({ dir: tmp16 });
+      assert.strictEqual(fresh.created, true, '新 keypair 应标记 created');
+      assert.notStrictEqual(fresh.keyId, first.keyId, '新 keyId 必须与旧的不同');
+      assert.notStrictEqual(fresh.fingerprint, first.fingerprint, '新指纹必须与旧的不同');
+      assert.notStrictEqual(fresh.nodeId, first.nodeId, '新 nodeId 必须与旧的不同');
+      const reread = wb.ensureKeyPair({ dir: tmp16 });
+      assert.strictEqual(reread.keyId, fresh.keyId, '轮换后 ensure 应读回新 keyId');
+      assert.strictEqual(reread.publicKey, fresh.publicKey, '轮换后公钥文件应与新 key 一致');
+      // 恢复：旧 key 回来，归档文件还在（恢复不删归档）。
+      const restored = wb.restoreKeyPair(backup, { dir: tmp16 });
+      assert.strictEqual(restored.keyId, first.keyId, '恢复后 keyId 应回旧值');
+      assert.ok(fs.existsSync(backup.backupPrivate), '恢复后归档私钥应还在');
+      // 无 key 时归档回 false；两次生成 key 不同。
+      const tmp16b = fs.mkdtempSync(path.join(os.tmpdir(), 'chimera-wsrotate-b-'));
+      try {
+        assert.strictEqual(wb.keyPairExists({ dir: tmp16b }), false, '空目录 keyPairExists 应为假');
+        assert.strictEqual(wb.archiveKeyPair({ dir: tmp16b }).archived, false, '无 key 时归档应回 false');
+        const g1 = wb.generateFreshKeyPair({ dir: tmp16b });
+        const g2 = wb.generateFreshKeyPair({ dir: tmp16b });
+        assert.notStrictEqual(g2.keyId, g1.keyId, '两次生成 keyId 应不同');
+      } finally {
+        fs.rmSync(tmp16b, { recursive: true, force: true });
+      }
+      ok('轮换：归档 0600 + 新 key 指纹/nodeId 全变 + 恢复回旧 key + 判定表');
+    } finally {
+      fs.rmSync(tmp16, { recursive: true, force: true });
+    }
+  }
+  // 16b. doRegistry：fake 脚本走通注册/吊销/401 回退/缺脚本四路。
+  {
+    const dr = require('../lib/doRegistry');
+    const tmp16c = fs.mkdtempSync(path.join(os.tmpdir(), 'chimera-doreg-'));
+    try {
+      const fakeRegister = path.join(tmp16c, 'fake-register.py');
+      fs.writeFileSync(fakeRegister, [
+        '#!/usr/bin/env python3',
+        'import sys',
+        'node_id = sys.argv[1]',
+        'if node_id == "ws-fail409":',
+        '    print(\'409 {"ok": false, "error": "conflict"}\')',
+        'elif node_id == "ws-fail500":',
+        '    print(\'500 {"ok": false, "error": "boom"}\')',
+        'else:',
+        '    print(\'200 {"ok": true, "key_id": "ed25519-x", "node_id": "\' + node_id + \'", "already_registered": false}\')',
+        '',
+      ].join('\n'));
+      const fakeRevoke = path.join(tmp16c, 'fake-revoke.py');
+      fs.writeFileSync(fakeRevoke, [
+        '#!/usr/bin/env python3',
+        'import sys',
+        'node_id = sys.argv[1]',
+        'with open(sys.argv[0].replace("fake-revoke.py", "calls.log"), "a") as f:',
+        '    f.write(" ".join(sys.argv[1:]) + "\\n")',
+        'if node_id == "ws-gone":',
+        '    print(\'404 {"ok": false, "code": "NOT_FOUND"}\')',
+        'elif node_id == "ws-needs-setup" and "--via" not in sys.argv:',
+        '    print(\'401 {"ok": false, "error": "unauthorized"}\')',
+        'else:',
+        '    print(\'200 {"ok": true, "revoked_at": "2026-11-25T00:00:00Z"}\')',
+        '',
+      ].join('\n'));
+      const reg = await dr.registerWorkspaceKey(
+        { nodeId: 'ws-abc', keyId: 'ed25519-x', publicKey: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' },
+        { scriptPath: fakeRegister });
+      assert.strictEqual(reg.ok, true, 'fake 注册 200 应回 ok');
+      assert.strictEqual(reg.node_id, 'ws-abc', 'fake 注册应回原 node_id');
+      await assert.rejects(
+        dr.registerWorkspaceKey({ nodeId: 'ws-fail409', keyId: 'ed25519-x', publicKey: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' }, { scriptPath: fakeRegister }),
+        /DO 注册失败：HTTP 409/,
+        'fake 注册 409 应抛错',
+      );
+      await assert.rejects(
+        dr.registerWorkspaceKey({ nodeId: 'ws-abc', keyId: 'ed25519-x', publicKey: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' }, { scriptPath: path.join(tmp16c, 'no-such-script.py') }),
+        /不在本机/,
+        '脚本不存在应报不在本机',
+      );
+      const rev = await dr.revokeWorkspaceKey('ws-abc', { scriptPath: fakeRevoke });
+      assert.strictEqual(rev.revoked, true, 'fake 吊销 200 应回 revoked');
+      const gone = await dr.revokeWorkspaceKey('ws-gone', { scriptPath: fakeRevoke });
+      assert.strictEqual(gone.alreadyRevoked, true, 'fake 吊销 404 应记 alreadyRevoked（no-op）');
+      const callsLog = path.join(tmp16c, 'calls.log');
+      if (fs.existsSync(callsLog)) fs.unlinkSync(callsLog);
+      const setup = await dr.revokeWorkspaceKey('ws-needs-setup', { scriptPath: fakeRevoke });
+      assert.strictEqual(setup.revoked, true, 'central 401 回退 setup 后应吊销成功');
+      const calls = fs.readFileSync(callsLog, 'utf8').trim().split('\n');
+      assert.strictEqual(calls.length, 2, '401 回退应正好调两次');
+      assert.ok(calls[1].includes('--via setup'), '第二次调用应带 --via setup');
+      ok('doRegistry：注册 200/409/缺脚本 + 吊销 200/404 + 401 回退 setup');
+    } finally {
+      fs.rmSync(tmp16c, { recursive: true, force: true });
+    }
+  }
+  // 16c. 主进程接线（c）：bind handler 先查行、已有活跃绑定拒绝、轮换
+  // 在先、DO 注册在论坛注册之前、失败恢复旧 key。
+  {
+    const mainSrc = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+    const hAt = mainSrc.indexOf("ipcMain.handle('api:workspace-bind'");
+    assert.ok(hAt >= 0, 'main.js 应包含 api:workspace-bind');
+    const hEnd = mainSrc.indexOf("ipcMain.handle('api:workspace-bindings'", hAt);
+    const hSrc = mainSrc.slice(hAt, hEnd);
+    assert.ok(mainSrc.includes("require('./lib/doRegistry')"), 'main.js 应引入 lib/doRegistry');
+    assert.ok(hSrc.includes('myWorkspaceBindings(token)'), 'bind 前应先查本人绑定行');
+    assert.ok(hSrc.indexOf('myWorkspaceBindings(token)') < hSrc.indexOf('registerWorkspaceBinding'), '查行应在论坛注册之前');
+    assert.ok(hSrc.includes('已绑定工作区，请先解绑再重绑'), '已有活跃绑定时应拒绝重绑');
+    assert.ok(hSrc.includes('shouldRotateKeyPair'), '应按轮换规则判定是否发新 keypair');
+    assert.ok(hSrc.includes('archiveKeyPair()'), '轮换时应先归档旧 keypair');
+    assert.ok(hSrc.includes('generateFreshKeyPair()'), '轮换时应生成新 keypair');
+    assert.ok(hSrc.includes('registerWorkspaceKey'), '应调 DO 注册新公钥');
+    assert.ok(hSrc.indexOf('registerWorkspaceKey') < hSrc.indexOf('registerWorkspaceBinding'), 'DO 注册应在论坛注册之前');
+    assert.ok(hSrc.includes('revokeWorkspaceKey'), '论坛注册失败时应吊销刚注册的 DO 新 key');
+    assert.ok(hSrc.includes('restoreKeyPair(rotated)'), '失败时应从归档恢复旧 keypair');
+    ok('主进程接线：先查行拒重复绑定、轮换在先、DO 注册先于论坛注册、失败恢复旧 key');
+  }
+
   console.log(`\nPASS: ${passed} 项全过`);
 }
 
