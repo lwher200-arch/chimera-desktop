@@ -29,6 +29,8 @@
       <input id="globalSearchInput" type="text" placeholder="搜索帖子与消息…" title="回车搜索全站" data-i18n-ph="top.searchPh" data-i18n-title="top.searchTitle">
       <button id="themeToggle" class="btn ghost" title="切换深色 / 浅色主题">🌙 深色</button>
       <button id="langToggle" class="btn ghost" title="切换翻译目标语言">翻译：中文</button>
+      <button id="notifBell" class="btn ghost notif-bell" title="通知" data-i18n-title="top.notifTitle">🔔<span id="notifBadge" class="notif-badge"></span></button>
+      <button id="settingsBtn" class="btn ghost" title="设置" data-i18n-title="top.settingsTitle">⚙️</button>
       <span class="status-pill"><span id="sseDot" class="dot off" title="实时连接状态" data-i18n-title="top.connStatus"></span><span id="sseText" class="muted">未连接</span></span>
       <span id="updatePill" class="update-pill hidden" title=""></span>
       <span id="whoamiAvatar" class="avatar avatar-sm av-0 hidden">?</span>
@@ -71,7 +73,7 @@
           <h3 data-i18n="side.boards">板块</h3>
           <div id="boardList"><p class="muted small" style="padding:0 10px" data-i18n="common.loading">加载中…</p></div>
         </div>
-        <div class="sidebar-foot muted small">v0.3.14</div>
+        <div class="sidebar-foot muted small">v0.3.15</div>
       </aside>
       <main id="main">
         <!-- 首页（简版落地页）：与网页版首页同构的精简版，完整版见论坛网页 -->
@@ -111,6 +113,7 @@
           </div>
         </div>
             <div id="chatPending" class="pending hidden"></div>
+            <div id="chatOutboxLine" class="outbox-line hidden"></div>
             <div id="chatInputRow" class="input-row hidden">
               <input id="chatInput" type="text" placeholder="发消息…（粘贴图片可直接发图）" autocomplete="off" data-i18n-ph="chat.sendPh">
               <button id="chatImageBtn" class="btn" title="发图片" data-i18n="chat.image" data-i18n-title="chat.imageTitle">🖼 图片</button>
@@ -127,6 +130,7 @@
             <div class="comm-form" id="feedComposer">
               <textarea id="feedPostBody" placeholder="写点什么…（最多 10000 字，发到当前板块）" data-i18n-ph="posts.composerPh"></textarea>
               <div class="form-row"><button class="btn primary" id="feedPostBtn" data-i18n="posts.postBtn">发帖</button><span class="comm-err" id="feedPostErr"></span></div>
+              <div id="feedOutboxLine" class="outbox-line hidden"></div>
             </div>
             <div id="postsList" class="items"></div>
             <div id="feedOlderRow" class="hidden" style="padding:8px 16px 0"><button id="feedOlderBtn" class="btn ghost" data-i18n="posts.loadOlder">加载更早的帖子</button></div>
@@ -154,6 +158,22 @@
           <div class="posts-wrap">
             <div class="list-head"><b data-i18n="team.title">团队</b><span class="spacer"></span><button id="teamRefresh" class="btn ghost" data-i18n="team.refresh">↻ 刷新</button></div>
             <div id="teamBody"></div>
+          </div>
+        </div>
+
+        <!-- 通知中心（v0.3.15，只做 @提醒） -->
+        <div id="pane-notif" class="pane hidden">
+          <div class="posts-wrap">
+            <div class="list-head"><b data-i18n="notif.title">通知</b><span class="muted small" data-i18n="notif.mentionOnly">只显示 @提醒</span><span class="spacer"></span><button id="notifRefresh" class="btn ghost" data-i18n="notif.refresh">↻ 刷新</button><button id="notifMarkReadBtn" class="btn" data-i18n="notif.markRead">全部已读</button></div>
+            <div id="notifList" class="items"></div>
+          </div>
+        </div>
+
+        <!-- 设置（v0.3.15，只读） -->
+        <div id="pane-settings" class="pane hidden">
+          <div class="posts-wrap">
+            <div class="list-head"><b data-i18n="settings.title">设置</b><span class="muted small" data-i18n="settings.readonlyNote">本页只读，不做任何修改操作。</span><span class="spacer"></span><button id="settingsRefresh" class="btn ghost" data-i18n="settings.refresh">↻ 刷新</button></div>
+            <div id="settingsBody"></div>
           </div>
         </div>
 

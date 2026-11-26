@@ -108,6 +108,12 @@ const state = {
   editingProfile: false, // 是否在编辑自己的资料
   lang: 'zh', // 翻译目标语言，默认中文（localStorage chimera_lang）
   lastTransport: null, // 最近一次 realtime:transport，供语言切换时重画指示器
+  postsDraftBoard: null, // 帖子编辑框当前草稿所属板块（切板时先存旧板草稿再恢复新板）
+  notif: { items: [], unread: 0, readTs: null, mentionEnabled: true, loaded: false }, // 通知中心（v0.3.15，只做 @提醒）
+  notifTimer: null, // 通知 60 秒轮询定时器（登录后起，登出/过期停）
+  settings: null, // 设置页最近一次只读数据（loadSettings 回包）
+  outbox: { pending: 0, failed: 0, total: 0, entries: [] }, // 发件箱最近状态（主进程推 + 主动拉）
+  outboxFlash: false, // 刚入箱时状态行前加“已存入发件箱”提示，5 秒后消
 };
 
 function esc(s) {
@@ -229,6 +235,103 @@ function feedNewestTsOf(pagePosts) {
   return ts;
 }
 
+// 通知中心（v0.3.15，只做 @提醒）与草稿：纯函数，Node 可测。
+// filterMentionNotifications：服务端回全类型（mention/reply/like/follow），
+// 桌面端只展示 type === 'mention' 的条目（含帖子 @ 与群消息 @）。
+function filterMentionNotifications(items) {
+  return (items || []).filter((n) => n && n.type === 'mention');
+}
+// notifUnreadCount：@未读 = ts 晚于本地水位 readTs 的 @条目数；
+// 水位为空（首跑、服务端 publicAccount 不暴露水位）时全部计未读，
+// 点一次“全部已读”后水位即写到当前时间，后续计数即准；
+// 时间戳解析失败的条目计未读（宁可多提醒，不漏 @）。
+function notifUnreadCount(mentions, readTs) {
+  const list = mentions || [];
+  if (!readTs) return list.length;
+  const water = Date.parse(readTs);
+  if (!Number.isFinite(water)) return list.length;
+  let n = 0;
+  for (const m of list) {
+    const t = Date.parse(m.ts || '');
+    if (!Number.isFinite(t) || t > water) n += 1;
+  }
+  return n;
+}
+// notifVerb：@提醒动词（与网页版 notif.verb_mention 同口径）；非 @ 类型不渲染。
+function notifVerb(n) {
+  if (n && n.type === 'mention') return ui('notif.verbMention');
+  return '';
+}
+// notifTarget：点条目跳哪——有 postId 看帖子、有 groupId 进群聊、
+// 否则看 @人资料卡（关注类无 postId/groupId）。
+function notifTarget(n) {
+  if (!n) return { kind: 'profile', name: '' };
+  if (n.postId) return { kind: 'post', id: n.postId };
+  if (n.groupId) return { kind: 'group', id: n.groupId };
+  return { kind: 'profile', name: (n.actor && n.actor.name) || '' };
+}
+
+// 草稿（v0.3.15）：没发出去的文字，按作用域存 localStorage，跨重启恢复；
+// 关应用不自动发（与发件箱已提交的消息严格区分）。storage 经 window 传，
+// Node 测试可注入假 localStorage。
+function draftKey(scope) { return 'chimera_draft:' + String(scope || ''); }
+function draftStorage(win) {
+  try {
+    const w = win || (typeof window !== 'undefined' ? window : null);
+    return (w && w.localStorage) || null;
+  } catch { return null; }
+}
+function loadDraft(scope, win) {
+  const st = draftStorage(win);
+  if (!st) return '';
+  try { return st.getItem(draftKey(scope)) || ''; } catch { return ''; }
+}
+function saveDraft(scope, text, win) {
+  const st = draftStorage(win);
+  if (!st) return;
+  try {
+    if (text) st.setItem(draftKey(scope), String(text));
+    else st.removeItem(draftKey(scope));
+  } catch { /* 草稿存失败不挡输入 */ }
+}
+function clearDraft(scope, win) { saveDraft(scope, '', win); }
+// draftKeyForOpen：当前打开会话的草稿作用域（依赖 state，Node 可测时传 state）。
+function draftKeyForOpen() {
+  return state.open ? 'conv:' + state.open.kind + ':' + state.open.id : null;
+}
+// countDrafts：设置页只读展示——本地有几个作用域存了非空草稿。
+function countDrafts(win) {
+  const st = draftStorage(win);
+  if (!st) return 0;
+  try {
+    let n = 0;
+    for (let i = 0; i < st.length; i += 1) {
+      const k = st.key(i);
+      if (String(k || '').startsWith('chimera_draft:') && st.getItem(k)) n += 1;
+    }
+    return n;
+  } catch { return 0; }
+}
+// outboxStatusText：发件箱状态行文案（纯函数）。flash 为真时前加
+// “已存入发件箱，联网后自动发送”；失败条目带本地丢弃按钮（只丢本地
+// 副本，不触服务端）。entries 里 dead 的才算失败。
+function outboxStatusText(st, flash) {
+  const s = st || { pending: 0, failed: 0, total: 0, entries: [] };
+  const parts = [];
+  if (flash) parts.push(ui('outbox.queued'));
+  if (s.pending > 0) parts.push(uiFmt('outbox.pending', s.pending));
+  const failed = (s.entries || []).filter((e) => e && e.dead);
+  if (failed.length) {
+    parts.push(uiFmt('outbox.failed', failed.length));
+    for (const e of failed) {
+      const preview = String(e.body || '').slice(0, 30);
+      const title = ui('outbox.failedTitle') + (preview ? '：' + preview : '') + (e.lastError ? ' — ' + e.lastError : '');
+      parts.push('<span class="failed-entry">' + esc(title) + ' <button class="btn ghost" data-discard-outbox="' + esc(e.clientId || '') + '">' + ui('outbox.discard') + '</button></span>');
+    }
+  }
+  return parts.join(' · ');
+}
+
 // 工作区绑定（融合 P0，纯函数，Node 可测）：指纹 = keyId 去掉 'ed25519-'
 // 前缀后的前 8 个 hex 字符；在线 = lastSeenTs 在 15 分钟内。
 function workspaceFingerprint(keyId) {
@@ -327,6 +430,10 @@ $('loginPass').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('lo
 // 过期时不调 logout（服务端会话已死，登出接口也会 401）。
 function resetToLogin() {
   state.me = null; state.open = null;
+  stopNotifTimer();
+  state.notif = { items: [], unread: 0, readTs: null, mentionEnabled: true, loaded: false };
+  state.settings = null;
+  paintNotifBadge();
   $('whoami').textContent = '';
   delete $('whoami').dataset.profile;
   setMeChip();
@@ -350,7 +457,20 @@ function showPane(v) {
   $('pane-node').classList.toggle('hidden', v !== 'node');
   $('pane-community').classList.toggle('hidden', v !== 'community');
   $('pane-team').classList.toggle('hidden', v !== 'team');
-  if (v === 'posts') loadPosts();
+  $('pane-notif').classList.toggle('hidden', v !== 'notif');
+  $('pane-settings').classList.toggle('hidden', v !== 'settings');
+  if (v === 'posts') {
+    // 切板/切页时先把当前框里的草稿存回旧板，再恢复新板的草稿。
+    // 框空时不存：空串会清键，而首开时框空正是因为草稿还没恢复。
+    const curPostDraft = ($('feedPostBody') || {}).value || '';
+    if (curPostDraft) saveDraft('post:' + (state.postsDraftBoard || 'all'), curPostDraft);
+    loadPosts();
+    state.postsDraftBoard = state.postsBoard || 'all';
+    const fb = $('feedPostBody');
+    if (fb) fb.value = loadDraft('post:' + state.postsDraftBoard);
+  }
+  if (v === 'notif') loadNotifications();
+  if (v === 'settings') loadSettings();
   if (v === 'search') { if (state.searchResults) renderSearchResults(); }
   if (v === 'node') refreshNodePanel();
   if (v === 'community') loadCommunity();
@@ -441,6 +561,9 @@ async function loadAll() {
     renderConvList();
     renderRightbar();
     loadHomeStats();
+    loadNotifications(); // 通知徽标：登录后即刷一次，之后 60 秒轮询
+    startNotifTimer();
+    refreshOutboxStatus(); // 发件箱状态行：上次离线未发的条目一进应用就可见
   } catch (err) {
     $('convItems').innerHTML = `<div class="muted" style="padding:12px">${ui('common.loadFail')}${esc(err.message || err)}</div>`;
   }
@@ -588,12 +711,15 @@ async function markGroupRead(gid) {
 }
 
 async function openConv(kind, id) {
+  // 切会话前先把当前框里的草稿存回旧会话（300ms 防抖可能还没跑）。
+  if (state.open) saveDraft(draftKeyForOpen(), $('chatInput').value);
   // 会话列表在左侧栏常驻，点会话时先切回会话面板（在帖子/节点页点会话也一样）。
   showPane('conv');
   const name = kind === 'group'
     ? (state.groups.find((g) => g.id === id)?.name || id)
     : id;
   state.open = { kind, id, name };
+  $('chatInput').value = loadDraft(draftKeyForOpen()); // 草稿跨重启恢复（v0.3.15）
   state.lastTs = null;
   state.renderedIds = new Set();
   state.hasMoreOlder = false;
@@ -916,14 +1042,22 @@ async function sendCurrent() {
     }
   }
   try {
+    let r;
     if (state.open.kind === 'group') {
-      await window.chimera.api.sendGroupMessage(state.open.id, body, attachments);
+      r = await window.chimera.api.sendGroupMessage(state.open.id, body, attachments);
     } else {
-      await window.chimera.api.sendDm(state.open.id, body, attachments);
+      r = await window.chimera.api.sendDm(state.open.id, body, attachments);
     }
     $('chatInput').value = '';
+    clearDraft(draftKeyForOpen()); // 发出去的文字不再是草稿（入箱也算提交）
     state.pending = [];
     renderPending();
+    if (r && r.queued) {
+      // 离线入箱：服务端没收到，不拉新消息；重连后主进程自动发。
+      queueFlash();
+      await refreshOutboxStatus();
+      return;
+    }
     // 自己发的消息：增量拉一次即可（回声事件到时按 id 去重，不会 double）。
     await fetchNewMessages(false);
   } catch (err) {
@@ -933,6 +1067,11 @@ async function sendCurrent() {
 
 $('chatSendBtn').addEventListener('click', sendCurrent);
 $('chatInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendCurrent(); });
+// 草稿（v0.3.15）：打字防抖存草稿，切会话前、发送后即清；跨重启恢复。
+$('chatInput').addEventListener('input', debounce(() => {
+  const k = draftKeyForOpen();
+  if (k) saveDraft(k, $('chatInput').value);
+}, 300));
 
 // ---------- posts ----------
 $('postsRefresh').addEventListener('click', loadPosts);
@@ -1106,12 +1245,24 @@ $('feedPostBtn').addEventListener('click', async (e) => {
   t.disabled = true;
   try {
     // 主帖子接口不存 title（服务端只读 body/board/reply_to），所以发帖框只有正文。
-    await window.chimera.api.createPost({ board: state.postsBoard || 'general', title: '', body });
+    const r = await window.chimera.api.createPost({ board: state.postsBoard || 'general', title: '', body });
     $('feedPostBody').value = '';
+    clearDraft('post:' + (state.postsBoard || 'all')); // 发出去的文字不再是草稿（入箱也算提交）
+    if (r && r.queued) {
+      // 离线入箱：服务端没收到，不拉新帖；重连后主进程自动发。
+      queueFlash();
+      await refreshOutboxStatus();
+      return;
+    }
     loadPosts();
   } catch (err) { if (errEl) errEl.textContent = err.message || err; }
   finally { t.disabled = false; }
 });
+// 草稿（v0.3.15）：帖子编辑框按板块存草稿，跨重启恢复。
+$('feedPostBody').addEventListener('input', debounce(() => {
+  state.postsDraftBoard = state.postsBoard || 'all';
+  saveDraft('post:' + state.postsDraftBoard, $('feedPostBody').value);
+}, 300));
 $('postsList').addEventListener('click', async (e) => {
   const t = e.target.closest('[data-action]');
   if (!t) return;
@@ -1466,8 +1617,15 @@ async function handlePostAction(action, t, ctx) {
     if (!body) return;
     t.disabled = true;
     try {
-      await window.chimera.api.createPost({ board: null, title: '', body, replyTo: t.dataset.id });
+      const r = await window.chimera.api.createPost({ board: null, title: '', body, replyTo: t.dataset.id });
       state.replyingTo = null;
+      if (r && r.queued) {
+        // 离线入箱：服务端没收到，不拉新帖；重连后主进程自动发。
+        queueFlash();
+        await refreshOutboxStatus();
+        ctx.render();
+        return;
+      }
       await ctx.load();
     } catch (err) { setPostErr(t.dataset.id, err.message || err); }
     finally { t.disabled = false; }
@@ -1554,6 +1712,7 @@ function renderCommunity() {
         <textarea id="newPostBody" placeholder="${ui('community.newPostBodyPh')}"></textarea>
         <div class="form-row"><button class="btn primary" data-action="new-post">${ui('community.newPost')}</button>
         <span class="comm-err" id="newPostErr"></span></div>
+        <div id="teamOutboxLine" class="outbox-line hidden"></div>
       </div>` : '<p class="muted small">' + ui('community.onlyMembers') + '</p>'}
     </div>
     <div class="comm-section"><h3>${ui('community.ann')}</h3>
@@ -1598,6 +1757,7 @@ function renderCommunity() {
   // 已加载的讨论列表随重渲染恢复（切换表单/语言/改角色失败等 bare render 不会
   // 把列表打回“加载中…”）；未加载时留占位，由调用方 loadTeamPosts() 拉取。
   if (state.teamPostsLoaded) renderTeamPosts();
+  renderOutboxLine(); // 团队表单是 innerHTML 重建，状态行每次重画后补回来
 }
 
 // 社区页所有写操作走一个委托处理器：服务端原话展示，不自己编理由。
@@ -1670,8 +1830,14 @@ $('communityBody').addEventListener('click', async (e) => {
       if (!body) { setErr('newPostErr', ui('posts.emptyBodyErr')); return; }
       t.disabled = true;
       try {
-        await window.chimera.api.createCommunityPost(c.id, { title, body });
+        const r = await window.chimera.api.createCommunityPost(c.id, { title, body });
         $('newPostTitle').value = ''; $('newPostBody').value = '';
+        if (r && r.queued) {
+          // 离线入箱：服务端没收到，不拉新帖；重连后主进程自动发。
+          queueFlash();
+          await refreshOutboxStatus();
+          return;
+        }
         loadTeamPosts();
       } catch (err) { setErr('newPostErr', err.message || err); } finally { t.disabled = false; }
       return;
@@ -1931,6 +2097,215 @@ $('nodeHeadersBtn').addEventListener('click', async () => {
   } catch (err) { alert(ui('node.readFailShort') + (err.message || err)); }
 });
 
+// ---------- 通知中心（v0.3.15，只做 @提醒） ----------
+// 入口：顶栏铃铛（角标 = @未读数，99+ 封顶）；列表只显示 type === 'mention'；
+// 未读按本地水位算（服务端 publicAccount 不暴露 notifReadTs，首跑全部计未读）；
+// 全部已读调 POST /api/notifications/read，服务端水位与本地水位同步写当前时间。
+// 401 走 v0.3.13 的 session:expired（guardApi），这里不另起一套。
+// 刷新：打开面板时 + 登录后每 60 秒（与网页版通知 60 秒常驻同口径）；
+// mention 事件到时也刷一次（@人实时到，徽标不用等 60 秒）。
+async function loadNotifications() {
+  if (!state.me) return;
+  try {
+    const data = await window.chimera.api.notifications();
+    state.notif.items = filterMentionNotifications(data.notifications || []);
+    state.notif.readTs = data.readTs || state.notif.readTs;
+    state.notif.mentionEnabled = data.mentionEnabled !== false;
+    state.notif.unread = notifUnreadCount(state.notif.items, state.notif.readTs);
+    state.notif.loaded = true;
+    paintNotifBadge();
+    renderNotifList();
+  } catch (err) {
+    const box = $('notifList');
+    if (box && !$('pane-notif').classList.contains('hidden')) {
+      box.innerHTML = '<div class="muted" style="padding:12px">' + ui('notif.loadFail') + esc(err.message || err) + '</div>';
+    }
+  }
+}
+
+function paintNotifBadge() {
+  const badge = $('notifBadge');
+  if (!badge) return;
+  const n = state.notif.mentionEnabled ? (state.notif.unread || 0) : 0;
+  badge.textContent = n > 0 ? (n > 99 ? '99+' : String(n)) : '';
+}
+
+function renderNotifList() {
+  const box = $('notifList');
+  if (!box) return;
+  const items = state.notif.items || [];
+  if (!state.notif.loaded) {
+    box.innerHTML = '<div class="muted small">' + ui('common.loading') + '</div>';
+    return;
+  }
+  if (!items.length) {
+    box.innerHTML = '<div class="empty-note">' + ui('notif.empty') + '</div>';
+    return;
+  }
+  const water = state.notif.readTs ? Date.parse(state.notif.readTs) : null;
+  box.innerHTML = items.map((n) => {
+    const t = Date.parse(n.ts || '');
+    const isUnread = !Number.isFinite(water) || !Number.isFinite(t) || t > water;
+    const actor = (n.actor && n.actor.name) || '?';
+    const tgt = notifTarget(n);
+    return '<div class="notif-item' + (isUnread ? ' unread-item' : '') + '" data-target-kind="' + esc(tgt.kind) + '" data-target-id="' + esc(tgt.id || '') + '" data-target-name="' + esc(tgt.name || '') + '">'
+      + avatarHtml(actor, 'avatar-sm')
+      + '<div class="item-main"><div class="item-name"><button class="linklike" data-profile="' + esc(actor) + '">' + esc(actor) + '</button><span>' + esc(notifVerb(n)) + '</span></div>'
+      + (n.preview ? '<div class="notif-preview">' + esc(n.preview) + '</div>' : '')
+      + '<div class="notif-time">' + esc(fmtTime(n.ts)) + '</div></div>'
+      + '</div>';
+  }).join('');
+}
+
+function startNotifTimer() {
+  stopNotifTimer();
+  state.notifTimer = setInterval(() => { loadNotifications().catch(() => {}); }, 60 * 1000);
+}
+function stopNotifTimer() {
+  if (state.notifTimer) { clearInterval(state.notifTimer); state.notifTimer = null; }
+}
+
+$('notifBell').addEventListener('click', () => showPane('notif'));
+$('notifRefresh').addEventListener('click', loadNotifications);
+$('notifMarkReadBtn').addEventListener('click', async () => {
+  const btn = $('notifMarkReadBtn');
+  btn.disabled = true;
+  try {
+    const data = await window.chimera.api.markNotificationsRead();
+    state.notif.readTs = (data && data.readTs) || new Date().toISOString();
+    state.notif.unread = 0;
+    paintNotifBadge();
+    renderNotifList();
+  } catch (err) {
+    // 标记已读失败不清空徽标，下次再点；不弹 alert 挡阅读。
+  } finally { btn.disabled = false; }
+});
+// 点条目跳转：帖子 → 帖子页，群聊 → 打开该群，否则 → @人资料卡。
+// 人名按钮走全局资料卡处理，这里跳过（避免一次点击开两个地方）。
+$('notifList').addEventListener('click', (e) => {
+  if (e.target.closest('[data-profile]')) return;
+  const item = e.target.closest('.notif-item');
+  if (!item) return;
+  const kind = item.dataset.targetKind;
+  if (kind === 'post') { showPane('posts'); return; }
+  if (kind === 'group' && item.dataset.targetId) { openConv('group', item.dataset.targetId); return; }
+  if (kind === 'profile' && item.dataset.targetName) { openProfile(item.dataset.targetName); }
+});
+
+// ---------- 设置（v0.3.15，只读） ----------
+// 只读展示：账号（state.accounts 里的本人行：名字/类型/等级/积分）、
+// 工作区绑定（api:workspace-bindings 活跃行 + accounts 的 hasWorkspace/
+// workspaceOnline）、通知偏好（本地 @提醒开关，只展示不给开关）、
+// 发件箱计数（api:outbox-status）、草稿计数（本地 localStorage 统计）、
+// 会话有效期（session:get）。本页没有任何写操作：不调 rotate/revoke/
+// unbind/updateMe，不设任何动作按钮；刷新按钮只重拉只读数据。
+async function loadSettings() {
+  const box = $('settingsBody');
+  if (!box) return;
+  try {
+    const [sess, accounts, bindings, outboxStatus] = await Promise.all([
+      window.chimera.session.get().catch(() => null),
+      window.chimera.api.accounts().catch(() => ({ accounts: [] })),
+      window.chimera.api.workspaceBindings().catch(() => ({ bindings: [] })),
+      window.chimera.api.outboxStatus().catch(() => ({ pending: 0, failed: 0, total: 0 })),
+    ]);
+    if (accounts && accounts.accounts) state.accounts = accounts.accounts;
+    const me = state.me && state.me.username;
+    const acc = me ? accountByName(me) : null;
+    const rows = (bindings && bindings.bindings) || [];
+    const active = rows.find((b) => !b.unlinkedTs) || null;
+    state.settings = { sess, acc, active, outboxStatus, draftCount: countDrafts() };
+    renderSettings();
+  } catch (err) {
+    box.innerHTML = '<div class="muted" style="padding:12px">' + ui('settings.loadFail') + esc(err.message || err) + '</div>';
+  }
+}
+
+function renderSettings() {
+  const box = $('settingsBody');
+  if (!box) return;
+  const s = state.settings;
+  if (!s) {
+    box.innerHTML = '<div class="muted small">' + ui('common.loading') + '</div>';
+    return;
+  }
+  const acc = s.acc;
+  const ob = s.outboxStatus || { pending: 0, failed: 0, total: 0 };
+  const mentionOn = state.notif.mentionEnabled !== false;
+  const sess = s.sess;
+  const expires = sess && sess.expiresAt ? fmtTime(new Date(sess.expiresAt).toISOString()) : '—';
+  const card = (label, value) => '<div class="stat-card"><div class="stat-label">' + esc(label) + '</div><div class="stat-value">' + esc(value) + '</div></div>';
+  const typeText = acc ? (acc.type === 'human' ? ui('profile.human') : acc.type === 'ai' ? ui('profile.ai') : ui('profile.node')) : '';
+  const wsBound = acc ? !!acc.hasWorkspace : !!s.active;
+  box.innerHTML = ''
+    + '<div class="settings-sec"><h3>' + ui('settings.account') + '</h3><div class="settings-grid">'
+    + (acc
+      ? card(ui('settings.name'), acc.name || '') + card(ui('settings.type'), typeText) + card(ui('settings.level'), acc.level || '—') + card(ui('settings.points'), String(acc.points ?? 0))
+      : '<div class="muted small">' + ui('settings.noAccount') + '</div>')
+    + '</div></div>'
+    + '<div class="settings-sec"><h3>' + ui('settings.workspace') + '</h3><div class="settings-grid">'
+    + card(ui('settings.bindState'), wsBound ? ui('settings.bound') : ui('settings.unbound'))
+    + card(ui('settings.onlineState'), acc && acc.workspaceOnline ? ui('settings.online') : ui('settings.offline'))
+    + (s.active ? card(ui('settings.device'), s.active.deviceName || '') + card(ui('settings.fingerprint'), workspaceFingerprint(s.active.keyId)) : '')
+    + '</div></div>'
+    + '<div class="settings-sec"><h3>' + ui('settings.notif') + '</h3><div class="settings-grid">'
+    + card(ui('settings.mention'), mentionOn ? ui('settings.mentionOn') : ui('settings.mentionOff'))
+    + '</div></div>'
+    + '<div class="settings-sec"><h3>' + ui('settings.outbox') + '</h3><div class="settings-grid">'
+    + card(ui('settings.pending'), String(ob.pending || 0))
+    + card(ui('settings.failed'), String(ob.failed || 0))
+    + card(ui('settings.drafts'), String(s.draftCount || 0))
+    + '</div></div>'
+    + '<div class="settings-sec"><h3>' + ui('settings.session') + '</h3><div class="settings-grid">'
+    + card(ui('settings.name'), (sess && sess.username) || (state.me && state.me.username) || '')
+    + card(ui('settings.expires'), expires)
+    + '</div></div>';
+}
+
+$('settingsBtn').addEventListener('click', () => showPane('settings'));
+$('settingsRefresh').addEventListener('click', loadSettings);
+
+// ---------- 发件箱状态行（v0.3.15） ----------
+// 聊天框、帖子编辑器、团队讨论三处共用：有待发/失败条目时显示，
+// 无条目时隐藏。失败条目的丢弃按钮只丢本地副本（主进程 discard）。
+async function refreshOutboxStatus() {
+  try {
+    const st = await window.chimera.api.outboxStatus();
+    state.outbox = st || { pending: 0, failed: 0, total: 0, entries: [] };
+  } catch { /* 状态拉不到就留上次，不挡界面 */ }
+  renderOutboxLine();
+}
+
+function renderOutboxLine() {
+  const text = outboxStatusText(state.outbox, state.outboxFlash);
+  for (const id of ['chatOutboxLine', 'feedOutboxLine', 'teamOutboxLine']) {
+    const el = $(id);
+    if (!el) continue;
+    if (!text) { el.classList.add('hidden'); el.innerHTML = ''; continue; }
+    el.classList.remove('hidden');
+    el.innerHTML = text;
+  }
+  document.querySelectorAll('[data-discard-outbox]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      try { await window.chimera.api.outboxDiscard(btn.dataset.discardOutbox); await refreshOutboxStatus(); }
+      catch { btn.disabled = false; }
+    });
+  });
+}
+
+window.chimera.onOutboxStatus((st) => {
+  state.outbox = st || { pending: 0, failed: 0, total: 0, entries: [] };
+  renderOutboxLine();
+});
+
+// queueFlash：一次发送入箱后，状态行前 5 秒显示“已存入发件箱”提示，
+// 之后只显示计数。主进程入箱后立即推状态，提示与计数同框出现。
+function queueFlash() {
+  state.outboxFlash = true;
+  setTimeout(() => { state.outboxFlash = false; renderOutboxLine(); }, 5000);
+}
+
 // ---------- SSE wiring (main process owns the connection) ----------
 // 事件只改自己那一项，不再全量 loadAll（原来每事件约 390ms、3 个 HTTP 请求）。
 // 指示器只走 realtime:transport（v0.2.1）：onSseConnect/onSseDisconnect
@@ -1972,6 +2347,7 @@ window.chimera.onSseEvent(async ({ event, data, seq }) => {
   if (event === 'mention') {
     // 私聊没有专属事件；打开着私聊时顺带增量拉一次，别的不动。
     if (state.open?.kind === 'dm') await fetchNewMessages(false);
+    loadNotifications().catch(() => {}); // @到实时刷徽标，不等 60 秒轮询
     return;
   }
   // presence / typing / pong 等临时消息：不刷新列表、不打扰阅读。
@@ -2057,6 +2433,9 @@ function syncChrome() {
   syncOlderButton();
   renderHomeStats(); // 首页统计卡跟随语言（v0.3.13）：只重画，不重拉
   layoutTopNav(); // 窄屏导航重算可见项（v0.3.13）
+  if (!$('pane-notif').classList.contains('hidden')) renderNotifList(); // 通知列表跟随语言：只重画，不重拉
+  if (!$('pane-settings').classList.contains('hidden')) renderSettings(); // 设置页跟随语言：只重画，不重拉
+  renderOutboxLine(); // 发件箱状态行跟随语言：只重画，不重拉
 }
 
 function syncThemeBtn() {

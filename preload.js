@@ -50,6 +50,11 @@ contextBridge.exposeInMainWorld('chimera', {
     toggleFollow: (name) => ipcRenderer.invoke('api:toggle-follow', { name }),
     followingFeed: (opts) => ipcRenderer.invoke('api:following-feed', opts || {}),
     updateMe: (patch) => ipcRenderer.invoke('api:update-me', { patch }),
+    // v0.3.15：通知中心（只做 @提醒）+ 发件箱状态/丢弃（本地操作）。
+    notifications: () => ipcRenderer.invoke('api:notifications'),
+    markNotificationsRead: () => ipcRenderer.invoke('api:notifications-read'),
+    outboxStatus: () => ipcRenderer.invoke('api:outbox-status'),
+    outboxDiscard: (clientId) => ipcRenderer.invoke('api:outbox-discard', { clientId }),
     joinGroup: (groupId) => ipcRenderer.invoke('api:join-group', { groupId }),
     // 工作区绑定（融合 P0）：challenge → 签名 → 注册（签名在主进程完成，
     // 渲染进程拿不到私钥）；bindings 只读展示；unlink 留接口，P0 无解绑按钮。
@@ -86,6 +91,8 @@ contextBridge.exposeInMainWorld('chimera', {
   onSessionExpired: (fn) => ipcRenderer.on('session:expired', (_e, payload) => fn(payload)),
   // 更新已暂存（v0.3.13）：{version}，渲染进程顶栏提示。
   onUpdateStaged: (fn) => ipcRenderer.on('update:staged', (_e, payload) => fn(payload)),
+  // 发件箱状态推送（v0.3.15）：{pending, failed, total, entries}，每次变动都推。
+  onOutboxStatus: (fn) => ipcRenderer.on('outbox:status', (_e, payload) => fn(payload)),
   onNodeState: (fn) => ipcRenderer.on('node:state', (_e, payload) => fn(payload)),
   onNodeLog: (fn) => ipcRenderer.on('node:log', (_e, line) => fn(line)),
   onNodeSync: (fn) => ipcRenderer.on('node:sync', (_e, status) => fn(status)),

@@ -100,6 +100,15 @@ function startMockForum() {
       { id: 'acc-newai', name: 'newai', type: 'ai', role: 'member', bio: '', signature: '', tags: [], strengths: [], weaknesses: [], links: [], points: 0, level: 'L1', levelNum: 1, status: 'active', online: false, stats: { posts: 0, replies: 0, messages: 0, likesReceived: 0, shared: 0 }, model: 'mock-model', isBot: false, verified: null, owner: 'testhuman' },
     ],
     follows: [], // {follower, follower_type, following, following_type, ts}
+    // 通知中心（v0.3.15）：全类型回包（mention/reply/like/follow），
+    // unreadCount 按 notifReadTs 算（与真实服务端同一口径）。
+    notifications: [
+      { id: 'mention:p-feed-1', type: 'mention', ts: '2026-11-25T10:00:00.000Z', actor: { name: 'otherhuman', type: 'human' }, postId: 'p-feed-1', preview: '@testhuman 看这个' },
+      { id: 'reply:p-feed-1', type: 'reply', ts: '2026-11-25T11:00:00.000Z', actor: { name: 'otherhuman', type: 'human' }, postId: 'p-feed-1', preview: '回了你的帖子' },
+      { id: 'mention-msg:m-feed-1', type: 'mention', ts: '2026-11-25T12:00:00.000Z', actor: { name: 'stranger', type: 'human' }, groupId: 'grp-public', preview: '@testhuman 群里 @ 你' },
+      { id: 'like:p-feed-1', type: 'like', ts: '2026-11-25T13:00:00.000Z', actor: { name: 'stranger', type: 'human' }, postId: 'p-feed-1', preview: '', likers: ['stranger'], likesCount: 1 },
+    ],
+    notifReadTs: null,
   };
   const canonical = (o) => JSON.stringify(o, Object.keys(o).sort());
   const server = http.createServer((req, res) => {
@@ -580,6 +589,21 @@ function startMockForum() {
         const posts = state.feedPosts.filter((p) => !p.deleted && names.has(p.author));
         const page = posts.slice(0, limit);
         res.end(JSON.stringify({ ok: true, posts: page.map(pubPost), total: posts.length, has_more: posts.length > page.length, pinned_total: 0, pinned: [] })); return;
+      }
+      // GET /api/notifications（v0.3.15 通知中心）：回全类型，unreadCount 按
+      // notifReadTs 算（与真实服务端同一口径：全类型、ts 倒序、上限 20）。
+      if (req.method === 'GET' && url.pathname === '/api/notifications') {
+        const me = bearerMe(); if (!me) return comm401();
+        const list = state.notifications.slice().sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts));
+        const water = state.notifReadTs ? Date.parse(state.notifReadTs) : 0;
+        const unreadCount = list.filter((n) => Date.parse(n.ts) > water).length;
+        res.end(JSON.stringify({ ok: true, notifications: list.slice(0, 20), unreadCount })); return;
+      }
+      // POST /api/notifications/read（v0.3.15）：水位写到当前时间并回 notifReadTs。
+      if (req.method === 'POST' && url.pathname === '/api/notifications/read') {
+        const me = bearerMe(); if (!me) return comm401();
+        state.notifReadTs = new Date().toISOString();
+        res.end(JSON.stringify({ ok: true, notifReadTs: state.notifReadTs })); return;
       }
       res.end(JSON.stringify({ ok: true, posts: 472, accounts: 30, groups: 10, messages: 1676, dms: 7 }));
     });
@@ -3731,14 +3755,17 @@ async function main() {
     assert.ok(mainSrc18.includes("sendToRenderer('session:expired'"), '过期应推 session:expired');
     assert.ok(mainSrc18.includes('function apiHandle(channel, fn)'), '应有 apiHandle');
     const n = (mainSrc18.match(/apiHandle\('api:/g) || []).length;
-    assert.strictEqual(n, 41, `需 token 的 api 处理器应有 41 个包进 guardApi，实际 ${n} 个`);
+    // 41（v0.3.13）+ 4（v0.3.15：notifications/notifications-read/outbox-status/
+    // outbox-discard；后两个是本地状态、走同一注册口径，guardApi 只在 401
+    // 时触发，对它们是 no-op）。
+    assert.strictEqual(n, 45, `需 token 的 api 处理器应有 45 个包进 guardApi，实际 ${n} 个`);
     for (const ch of ['api:health', 'api:leaderboard', 'api:accounts', 'api:boards']) {
       assert.ok(mainSrc18.includes(`ipcMain.handle('${ch}'`), `${ch} 公共接口应保持 plain ipcMain.handle`);
       assert.ok(!mainSrc18.includes(`apiHandle('${ch}'`), `${ch} 不应包 guardApi`);
     }
     assert.ok(mainSrc18.includes("realtime.on('session-expired'"), 'realtime session-expired 应有订阅');
     assert.ok(/realtime\.on\('session-expired'[\s\S]*?onSessionExpired\(\)/.test(mainSrc18), 'session-expired 处理应调 onSessionExpired');
-    ok('main.js 401 接线：guardApi + onSessionExpired + 41 个处理器 + 4 个公共接口除外');
+    ok('main.js 401 接线：guardApi + onSessionExpired + 45 个处理器 + 4 个公共接口除外');
   }
   // 18f. resetToLogin：抽函数在假 DOM 上跑；setTransport 遇 session-expired 调它。
   {
@@ -3759,14 +3786,20 @@ async function main() {
     const els = { whoami: makeEl18(), logoutBtn: makeEl18(), whoamiAvatar: makeEl18(), sseDot: makeEl18(), sseText: makeEl18() };
     els.whoami.textContent = 'coldhao';
     els.whoami.dataset.profile = 'coldhao';
-    const fakeState = { me: { username: 'coldhao' }, open: { kind: 'group', id: 'g1' } };
+    const fakeState = { me: { username: 'coldhao' }, open: { kind: 'group', id: 'g1' }, notif: { items: [{ id: 'mention:p1' }], unread: 3, readTs: '2026-11-25T00:00:00.000Z', mentionEnabled: true, loaded: true }, settings: { acc: {} } };
     let chipCalls = 0;
+    let stopNotifCalls = 0;
+    let paintBadgeCalls = 0;
     const shown = [];
-    const resetToLogin = new Function('state', '$', 'setMeChip', 'show',
-      `${extractFn18('resetToLogin')}; return resetToLogin;`)(fakeState, (id) => els[id], () => { chipCalls += 1; }, (v) => shown.push(v));
+    const resetToLogin = new Function('state', '$', 'setMeChip', 'show', 'stopNotifTimer', 'paintNotifBadge',
+      `${extractFn18('resetToLogin')}; return resetToLogin;`)(fakeState, (id) => els[id], () => { chipCalls += 1; }, (v) => shown.push(v), () => { stopNotifCalls += 1; }, () => { paintBadgeCalls += 1; });
     resetToLogin();
     assert.strictEqual(fakeState.me, null, '应清 me');
     assert.strictEqual(fakeState.open, null, '应清 open');
+    assert.strictEqual(stopNotifCalls, 1, '登出应停通知轮询（v0.3.15）');
+    assert.strictEqual(paintBadgeCalls, 1, '登出应重画通知徽标（清零，v0.3.15）');
+    assert.deepStrictEqual(fakeState.notif, { items: [], unread: 0, readTs: null, mentionEnabled: true, loaded: false }, '登出应清通知状态（v0.3.15）');
+    assert.strictEqual(fakeState.settings, null, '登出应清设置页缓存（v0.3.15）');
     assert.strictEqual(els.whoami.textContent, '', '应清 whoami 文本');
     assert.strictEqual(els.whoami.dataset.profile, undefined, '应清 profile 标记');
     assert.strictEqual(chipCalls, 1, '应重画 whoami chip');
@@ -4480,6 +4513,342 @@ async function main() {
       assert.strictEqual(anchor, 'n01', 'DOM 插入锚点应是第一张现有流卡');
       ok('loadOlderPosts 回归：游标=最老时再拉一页得 30 张全新卡、零重叠');
     }
+  }
+
+  console.log('== 20. v0.3.15：通知中心（@提醒）/ 只读设置 / 离线发件箱 / 草稿 ==');
+  const rendererSrc20 = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'renderer.js'), 'utf8');
+  const mainSrc20 = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  const preloadSrc20 = fs.readFileSync(path.join(__dirname, '..', 'preload.js'), 'utf8');
+  const html20 = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'index.html'), 'utf8');
+  const css20 = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'styles.css'), 'utf8');
+  const outboxSrc20 = fs.readFileSync(path.join(__dirname, '..', 'lib', 'outbox.js'), 'utf8');
+  const extractFn20 = (name) => {
+    const m = rendererSrc20.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n\\}`));
+    assert.ok(m, `renderer.js 应包含 ${name}`);
+    return m[0];
+  };
+  const { Outbox, createClientId, isNetworkError } = require('../lib/outbox');
+  const { ForumApiError } = require('../lib/forumClient');
+  tr.setViewerLang('zh');
+  const ui20 = (k) => tr.ui(k);
+  const uiFmt20 = (...a) => tr.uiFmt(...a);
+  const esc20 = new Function(`${extractFn20('esc')}; return esc;`)();
+  // 假 localStorage（带 key/length，供 countDrafts 用）；经 win 参数注入，不动全局。
+  const fakeLS20 = {
+    _m: new Map(),
+    getItem(k) { return this._m.has(k) ? this._m.get(k) : null; },
+    setItem(k, v) { this._m.set(k, String(v)); },
+    removeItem(k) { this._m.delete(k); },
+    key(i) { const ks = [...this._m.keys()]; return i < ks.length ? ks[i] : null; },
+    get length() { return this._m.size; },
+  };
+  const fakeWin20 = { localStorage: fakeLS20 };
+  // 20a. 通知纯函数：@过滤 / 未读计数（水位边界）/ 动词 / 跳转目标。
+  {
+    const filterMentionNotifications = new Function(`${extractFn20('filterMentionNotifications')}; return filterMentionNotifications;`)();
+    const notifUnreadCount = new Function(`${extractFn20('notifUnreadCount')}; return notifUnreadCount;`)();
+    const notifVerb = new Function('ui', `${extractFn20('notifVerb')}; return notifVerb;`)(ui20);
+    const notifTarget = new Function(`${extractFn20('notifTarget')}; return notifTarget;`)();
+    const mixed = [
+      { id: 'mention:p1', type: 'mention', ts: '2026-11-25T10:00:00.000Z', actor: { name: 'a', type: 'human' }, postId: 'p1', preview: '@你' },
+      { id: 'reply:p1', type: 'reply', ts: '2026-11-25T11:00:00.000Z', actor: { name: 'b', type: 'human' }, postId: 'p1' },
+      { id: 'mention-msg:m1', type: 'mention', ts: '2026-11-25T12:00:00.000Z', actor: { name: 'c', type: 'human' }, groupId: 'g1' },
+      { id: 'like:p1', type: 'like', ts: '2026-11-25T13:00:00.000Z', actor: { name: 'd', type: 'human' }, postId: 'p1' },
+      { id: 'follow:x', type: 'follow', ts: '2026-11-25T14:00:00.000Z', actor: { name: 'e', type: 'human' } },
+    ];
+    const mentions = filterMentionNotifications(mixed);
+    assert.deepStrictEqual(mentions.map((x) => x.id), ['mention:p1', 'mention-msg:m1'], '@过滤应只留 mention（含帖子 @ 与群消息 @）');
+    assert.deepStrictEqual(filterMentionNotifications(null), [], '空列表应回空数组');
+    // 未读计数：水位为空（首跑）全计未读；水位在中间只计晚于水位的；
+    // ts 等于水位不算未读；时间戳坏的计未读；水位本身坏的全计未读。
+    assert.strictEqual(notifUnreadCount(mentions, null), 2, '首跑无水位应全计未读');
+    assert.strictEqual(notifUnreadCount(mentions, '2026-11-25T11:00:00.000Z'), 1, '水位 11:00 时只有 12:00 的 @ 未读');
+    assert.strictEqual(notifUnreadCount(mentions, '2026-11-25T12:00:00.000Z'), 0, 'ts 等于水位不算未读（已读过）');
+    assert.strictEqual(notifUnreadCount(mentions, '2026-11-26T00:00:00.000Z'), 0, '水位晚于全部应为 0');
+    assert.strictEqual(notifUnreadCount([{ type: 'mention', ts: 'not-a-date' }], '2026-11-25T11:00:00.000Z'), 1, '时间戳坏的 @ 应计未读');
+    assert.strictEqual(notifUnreadCount(mentions, 'not-a-date'), 2, '水位坏时应全计未读');
+    assert.strictEqual(notifVerb({ type: 'mention' }), '@ 了你', '@动词应与网页版同口径');
+    assert.strictEqual(notifVerb({ type: 'like' }), '', '非 @ 类型不动词');
+    assert.deepStrictEqual(notifTarget(mixed[0]), { kind: 'post', id: 'p1' }, '有 postId 应跳帖子');
+    assert.deepStrictEqual(notifTarget(mixed[2]), { kind: 'group', id: 'g1' }, '有 groupId 应进群聊');
+    assert.deepStrictEqual(notifTarget(mixed[4]), { kind: 'profile', name: 'e' }, '无 postId/groupId 应看 @人资料卡');
+    assert.deepStrictEqual(notifTarget(null), { kind: 'profile', name: '' }, '空条目应回空资料卡目标');
+    ok('通知纯函数：@过滤只留 mention / 未读水位边界 / 动词 / 跳转目标');
+  }
+  // 20b. ForumClient 通知接口（mock 论坛）：全类型回包 + 标记已读清零 + 未登录 401。
+  {
+    const mock20 = await startMockForum();
+    try {
+      const mc = new ForumClient(mock20.url);
+      const list = await mc.getNotifications('test-token');
+      assert.strictEqual(list.notifications.length, 4, '应回 4 条通知（全类型）');
+      assert.strictEqual(list.unreadCount, 4, '未读应为 4（水位未设）');
+      assert.strictEqual(list.notifications[0].type, 'like', '应按 ts 倒序（最新在前）');
+      const read = await mc.markNotificationsRead('test-token');
+      assert.ok(read.notifReadTs, '标记已读应回 notifReadTs');
+      const list2 = await mc.getNotifications('test-token');
+      assert.strictEqual(list2.unreadCount, 0, '标记已读后未读应为 0');
+      await assert.rejects(mc.getNotifications(null), (e) => e && e.status === 401, '未登录取通知应回 401');
+      await assert.rejects(mc.markNotificationsRead(null), (e) => e && e.status === 401, '未登录标记已读应回 401');
+    } finally { mock20.close(); }
+    ok('ForumClient 通知接口：全类型回包 + 标记已读清零 + 未登录 401');
+  }
+  // 20c. Outbox：入箱去重 + FIFO 串行 + 网络错停发 + HTTP 错标 dead 续发 + 丢弃规则 + 单航班。
+  {
+    const makeStore = () => ({ state: { outbox: [] }, saves: 0, save() { this.saves += 1; } });
+    // 入箱去重 + FIFO 成功全发 + status 计数。
+    {
+      const store = makeStore();
+      const sent = [];
+      const ob = new Outbox({ store, send: async (e) => { sent.push(e.clientId); }, onChange: () => {} });
+      const a = ob.enqueue({ clientId: 'ob-a', kind: 'dm', target: { peer: 'd1' }, body: 'a' });
+      ob.enqueue({ clientId: 'ob-b', kind: 'group-message', target: { groupId: 'g1' }, body: 'b' });
+      const dup = ob.enqueue({ clientId: 'ob-a', kind: 'dm', target: { peer: 'd1' }, body: 'a-again' });
+      assert.strictEqual(dup, a, '同 clientId 重复入箱应回原条目');
+      assert.strictEqual(ob.entries.length, 2, '重复入箱不应多占一条');
+      assert.deepStrictEqual(ob.status().pending, 2, 'status.pending 应为 2');
+      const r = await ob.flush();
+      assert.deepStrictEqual(sent, ['ob-a', 'ob-b'], 'flush 应按入箱顺序串行发');
+      assert.strictEqual(r.flushed, 2, '应发 2 条');
+      assert.strictEqual(ob.entries.length, 0, '成功即删条目，不留重发');
+      assert.ok(store.saves > 0, '变动应落盘');
+      ok('Outbox：入箱去重 + FIFO 串行 + 成功即删 + status 计数');
+    }
+    // 网络错停发（后一条不碰）+ HTTP 错标 dead 续发下一条；dead 不再自动重试。
+    {
+      const store = makeStore();
+      const sent = [];
+      const ob = new Outbox({
+        store,
+        send: async (e) => {
+          sent.push(e.clientId);
+          if (e.clientId === 'ob-net') throw new Error('ECONNREFUSED');
+          if (e.clientId === 'ob-http') throw new ForumApiError('HTTP 500', 500);
+        },
+        onChange: () => {},
+      });
+      ob.enqueue({ clientId: 'ob-http', kind: 'post', target: {}, body: 'x' });
+      ob.enqueue({ clientId: 'ob-ok', kind: 'post', target: {}, body: 'y' });
+      ob.enqueue({ clientId: 'ob-net', kind: 'post', target: {}, body: 'z' });
+      ob.enqueue({ clientId: 'ob-after', kind: 'post', target: {}, body: 'w' });
+      const r = await ob.flush();
+      assert.deepStrictEqual(sent, ['ob-http', 'ob-ok', 'ob-net'], '网络错应停发，后一条不应尝试');
+      assert.strictEqual(r.flushed, 1, '只应发成功 1 条');
+      const byId = Object.fromEntries(ob.entries.map((e) => [e.clientId, e]));
+      assert.strictEqual(byId['ob-http'].dead, true, 'HTTP 错应标 dead（永久失败，不再自动重试）');
+      assert.match(byId['ob-http'].lastError, /500/, 'dead 条目应记 lastError');
+      assert.strictEqual(byId['ob-net'].dead, false, '网络错不应标 dead');
+      assert.strictEqual(byId['ob-net'].attempts, 1, '网络错条目 attempts 应 +1');
+      assert.strictEqual(byId['ob-after'].attempts, 0, '停发后一条 attempts 应为 0');
+      assert.strictEqual(ob.status().failed, 1, 'failed 应为 1');
+      sent.length = 0;
+      const r2 = await ob.flush();
+      assert.deepStrictEqual(sent, ['ob-net'], 'dead 条目不应再自动重试');
+      assert.strictEqual(r2.flushed, 0, '网络仍错时 flushed 应为 0');
+      ok('Outbox：网络错停发 + HTTP 错标 dead 续发 + dead 不再自动重试');
+    }
+    // 丢弃规则：发送中拒删，删后不在，删不存在回 false。
+    {
+      const store = makeStore();
+      let release = null;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const ob = new Outbox({ store, send: async () => { await gate; }, onChange: () => {} });
+      ob.enqueue({ clientId: 'ob-g', kind: 'dm', target: {}, body: 'g' });
+      const flushing = ob.flush();
+      await new Promise((r) => setTimeout(r, 20)); // 等 send 挂进 gate
+      assert.strictEqual(ob.discard('ob-g'), false, '发送中的条目应拒删');
+      assert.strictEqual(ob.entries.length, 1, '拒删后条目应还在');
+      release();
+      await flushing;
+      assert.strictEqual(ob.entries.length, 0, '发送成功后条目已删');
+      assert.strictEqual(ob.discard('ob-g'), false, '删不存在的条目应回 false');
+      ob.enqueue({ clientId: 'ob-h', kind: 'dm', target: {}, body: 'h' });
+      assert.strictEqual(ob.discard('ob-h'), true, '待发条目应能丢弃');
+      assert.strictEqual(ob.entries.length, 0, '丢弃后条目应没');
+      ok('Outbox 丢弃：发送中拒删 / 不存在回 false / 待发可删');
+    }
+    // 单航班 + clientId + isNetworkError。
+    {
+      const store = makeStore();
+      let calls = 0;
+      const ob = new Outbox({
+        store,
+        send: async () => { calls += 1; await new Promise((r) => setTimeout(r, 30)); },
+        onChange: () => {},
+      });
+      ob.enqueue({ clientId: 'ob-s', kind: 'dm', target: {}, body: 's' });
+      const p1 = ob.flush();
+      const p2 = await ob.flush();
+      assert.strictEqual(p2.skipped, true, '并发 flush 应直接跳过（单航班）');
+      await p1;
+      assert.strictEqual(calls, 1, '单航班下 send 只应跑一次');
+      assert.ok(/^ob-[0-9a-f-]{36}$/.test(createClientId()), 'clientId 应为 ob- + UUID');
+      assert.notStrictEqual(createClientId(), createClientId(), 'clientId 应唯一');
+      assert.strictEqual(isNetworkError(new ForumApiError('HTTP 500', 500)), false, 'HTTP 错不是网络错');
+      assert.strictEqual(isNetworkError(new Error('ECONNREFUSED')), true, '无响应的错是网络错');
+      ok('Outbox 单航班 + clientId 唯一 + isNetworkError 分流');
+    }
+  }
+  // 20d. Store：notif 水位 + outbox 条目持久化；旧文件缺键时补默认值。
+  {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chimera-store20-'));
+    const file = path.join(tmpDir, 'state.json');
+    try {
+      const st1 = new Store(file);
+      assert.deepStrictEqual(st1.state.outbox, [], '新 store 的 outbox 应为空数组');
+      assert.strictEqual(st1.state.notif.readTs, null, '新 store 的 notif.readTs 应为 null');
+      assert.strictEqual(st1.state.notif.mentionEnabled, true, '新 store 的 mentionEnabled 默认开');
+      st1.state.notif.readTs = '2026-11-26T10:00:00.000Z';
+      st1.state.notif.mentionEnabled = false;
+      st1.state.outbox.push({ clientId: 'ob-x1', kind: 'dm', target: { peer: 'd1' }, body: 'hello', title: '', attachments: [], createdAt: '2026-11-26T10:00:00.000Z', attempts: 0, dead: false, lastError: null });
+      st1.save();
+      const st2 = new Store(file);
+      assert.strictEqual(st2.state.notif.readTs, '2026-11-26T10:00:00.000Z', 'readTs 应持久化');
+      assert.strictEqual(st2.state.notif.mentionEnabled, false, 'mentionEnabled 应持久化');
+      assert.strictEqual(st2.state.outbox.length, 1, '发件箱条目应持久化');
+      assert.strictEqual(st2.state.outbox[0].clientId, 'ob-x1', '条目 clientId 应保留');
+      fs.writeFileSync(file, JSON.stringify({ version: 1 }));
+      const st3 = new Store(file);
+      assert.deepStrictEqual(st3.state.outbox, [], '旧文件缺 outbox 时应补空数组');
+      assert.strictEqual(st3.state.notif.readTs, null, '旧文件缺 notif 时应补默认值');
+    } finally { fs.rmSync(tmpDir, { recursive: true, force: true }); }
+    ok('Store：notif 水位 + outbox 条目持久化，旧文件缺键补默认值');
+  }
+  // 20e. 草稿：按作用域存取、空值清键、跨作用域隔离、计数只数非空草稿、无 storage 不抛错。
+  {
+    const draftFns = new Function('window', `
+      ${extractFn20('draftKey')};
+      ${extractFn20('draftStorage')};
+      ${extractFn20('loadDraft')};
+      ${extractFn20('saveDraft')};
+      ${extractFn20('clearDraft')};
+      ${extractFn20('countDrafts')};
+      return { draftKey, loadDraft, saveDraft, clearDraft, countDrafts };
+    `)(fakeWin20);
+    const { draftKey, loadDraft, saveDraft, clearDraft, countDrafts } = draftFns;
+    assert.strictEqual(draftKey('conv:group:g1'), 'chimera_draft:conv:group:g1', '草稿键应带 chimera_draft: 前缀');
+    assert.strictEqual(loadDraft('conv:group:g1', fakeWin20), '', '没存过应回空串');
+    saveDraft('conv:group:g1', '还没发', fakeWin20);
+    saveDraft('conv:dm:d1', '私信草稿', fakeWin20);
+    saveDraft('post:general', '帖子草稿', fakeWin20);
+    assert.strictEqual(loadDraft('conv:group:g1', fakeWin20), '还没发', '群聊草稿应按作用域存取');
+    assert.strictEqual(loadDraft('conv:dm:d1', fakeWin20), '私信草稿', '私信草稿应与群聊隔离');
+    assert.strictEqual(countDrafts(fakeWin20), 3, '应数出 3 个非空草稿');
+    saveDraft('conv:group:g1', '', fakeWin20);
+    assert.strictEqual(loadDraft('conv:group:g1', fakeWin20), '', '空值应清键');
+    assert.strictEqual(countDrafts(fakeWin20), 2, '清键后计数应减');
+    clearDraft('post:general', fakeWin20);
+    assert.strictEqual(loadDraft('post:general', fakeWin20), '', 'clearDraft 应清键');
+    assert.strictEqual(loadDraft('conv:dm:d1', { localStorage: null }), '', '无 storage 时 loadDraft 应回空串不抛错');
+    assert.strictEqual(countDrafts({ localStorage: null }), 0, '无 storage 时 countDrafts 应为 0');
+    saveDraft('x', 'y', { localStorage: null }); // 无 storage 时 saveDraft 不应抛错
+    const draftKeyForOpen = new Function('state', `${extractFn20('draftKeyForOpen')}; return draftKeyForOpen;`)({ open: { kind: 'group', id: 'g1' } });
+    assert.strictEqual(draftKeyForOpen(), 'conv:group:g1', '会话草稿键应按 kind:id 分作用域');
+    const draftKeyForOpenNone = new Function('state', `${extractFn20('draftKeyForOpen')}; return draftKeyForOpen;`)({ open: null });
+    assert.strictEqual(draftKeyForOpenNone(), null, '未打开会话时草稿键应为 null');
+    ok('草稿：按作用域存取隔离 / 空值清键 / 计数只数非空 / 无 storage 不抛错');
+  }
+  // 20f. outboxStatusText：空箱无文案、待发计数、flash 前缀、失败条目带丢弃按钮与预览截断。
+  {
+    const outboxStatusText = new Function('ui', 'uiFmt', 'esc', `${extractFn20('outboxStatusText')}; return outboxStatusText;`)(ui20, uiFmt20, esc20);
+    assert.strictEqual(outboxStatusText({ pending: 0, failed: 0, total: 0, entries: [] }, false), '', '空箱应无状态行');
+    assert.strictEqual(outboxStatusText({ pending: 1, failed: 0, total: 1, entries: [{ clientId: 'ob-1', kind: 'dm', body: 'hi', dead: false }] }, false), '待发送 1 条', '待发 1 条应显示计数');
+    assert.strictEqual(outboxStatusText({ pending: 2, failed: 0, total: 2, entries: [] }, true), '已存入发件箱，联网后自动发送 · 待发送 2 条', 'flash 应当前缀');
+    const failedText = outboxStatusText({ pending: 0, failed: 1, total: 1, entries: [{ clientId: 'ob-9', kind: 'post', body: '这条没发出去', dead: true, lastError: 'HTTP 500' }] }, false);
+    assert.ok(failedText.includes('发送失败 1 条'), '失败应显示计数');
+    assert.ok(failedText.includes('data-discard-outbox="ob-9"'), '失败条目应带本地丢弃按钮');
+    assert.ok(failedText.includes('这条没发出去'), '失败条目应显示正文预览');
+    assert.ok(failedText.includes('HTTP 500'), '失败条目应显示 lastError');
+    const longBody = '一'.repeat(40);
+    const truncText = outboxStatusText({ pending: 0, failed: 1, total: 1, entries: [{ clientId: 'ob-8', kind: 'post', body: longBody, dead: true, lastError: null }] }, false);
+    assert.ok(!truncText.includes(longBody), '预览应截到 30 字');
+    assert.ok(truncText.includes('一'.repeat(30)), '预览应保留前 30 字');
+    ok('outboxStatusText：空箱无文案 / 待发计数 / flash 前缀 / 失败带丢弃 + 预览截断');
+  }
+  // 20g. 接线：HTML 入口/面板/状态行、CSS、main/preload IPC、渲染层调用点齐全。
+  {
+    for (const id of ['notifBell', 'notifBadge', 'settingsBtn', 'pane-notif', 'pane-settings', 'notifMarkReadBtn', 'notifRefresh', 'notifList', 'settingsRefresh', 'settingsBody', 'chatOutboxLine', 'feedOutboxLine']) {
+      assert.ok(html20.includes(`id="${id}"`), `index.html 应含 ${id}`);
+    }
+    assert.ok(html20.includes('v0.3.15'), '侧栏脚应标 v0.3.15');
+    for (const cls of ['.notif-bell {', '.notif-badge {', '.notif-item {', '.outbox-line {', '.settings-grid {']) {
+      assert.ok(css20.includes(cls), `styles.css 应含 ${cls}`);
+    }
+    for (const api of ['notifications: () =>', 'markNotificationsRead: () =>', 'outboxStatus: () =>', 'outboxDiscard: (clientId)', 'onOutboxStatus: (fn)']) {
+      assert.ok(preloadSrc20.includes(api), `preload 应暴露 ${api}`);
+    }
+    assert.ok(preloadSrc20.includes('onUpdateStaged: (fn)'), 'preload 的 onUpdateStaged 不应被顶掉（v0.3.15 回归守卫）');
+    for (const ipc of ["api:notifications", "api:notifications-read", "api:outbox-status", "api:outbox-discard"]) {
+      assert.ok(mainSrc20.includes(ipc), `main 应注册 ${ipc}`);
+    }
+    assert.ok(mainSrc20.includes('function sendOrQueue('), 'main 应有 sendOrQueue（网络错才入箱）');
+    assert.ok(mainSrc20.includes('initOutbox()'), 'main 应在 whenReady 里初始化发件箱');
+    assert.ok(mainSrc20.includes('armOutboxFlushTimer'), 'main 应有发件箱 60 秒定时器');
+    assert.ok(mainSrc20.includes('outbox.flush()'), '重连时应触发发件箱 flush');
+    for (const fn of ['function loadNotifications()', 'function renderNotifList()', 'function loadSettings()', 'function renderSettings()', 'function refreshOutboxStatus()', 'function renderOutboxLine()', 'function queueFlash()']) {
+      assert.ok(rendererSrc20.includes(fn), `renderer 应含 ${fn}`);
+    }
+    assert.ok(rendererSrc20.includes("showPane('notif')"), '铃铛应开通知面板');
+    assert.ok(rendererSrc20.includes("showPane('settings')"), '齿轮应开设置面板');
+    assert.ok(rendererSrc20.includes('60 * 1000'), '通知轮询应为 60 秒');
+    assert.ok((rendererSrc20.match(/r\.queued/g) || []).length >= 4, '四条发送路径都应处理 queued 回包');
+    assert.ok((rendererSrc20.match(/queueFlash\(\);/g) || []).length >= 4, '四条发送路径都应闪一下入箱提示');
+    ok('接线：HTML 入口/面板/状态行 + CSS + main/preload IPC + 渲染层调用点齐全');
+  }
+  // 20h. 字典：本轮 43 个新 key 中英齐全、%s 个数一致（§12 已验全局 key 集相等）。
+  {
+    const keys20 = [
+      'top.notifTitle', 'top.settingsTitle',
+      'notif.title', 'notif.mentionOnly', 'notif.empty', 'notif.markRead', 'notif.refresh', 'notif.verbMention', 'notif.loadFail',
+      'settings.title', 'settings.readonlyNote', 'settings.refresh', 'settings.loadFail', 'settings.account', 'settings.workspace', 'settings.notif', 'settings.outbox', 'settings.session', 'settings.name', 'settings.type', 'settings.level', 'settings.points', 'settings.bound', 'settings.unbound', 'settings.online', 'settings.offline', 'settings.mention', 'settings.mentionOn', 'settings.mentionOff', 'settings.bindState', 'settings.onlineState', 'settings.device', 'settings.fingerprint', 'settings.noAccount', 'settings.expires', 'settings.pending', 'settings.failed', 'settings.drafts',
+      'outbox.queued', 'outbox.pending', 'outbox.failed', 'outbox.discard', 'outbox.failedTitle',
+    ];
+    assert.strictEqual(keys20.length, 43, '本轮新 key 应为 43 个');
+    for (const k of keys20) {
+      assert.ok(typeof tr._uiStrings.zh[k] === 'string' && tr._uiStrings.zh[k].length > 0, `中文字典应含 ${k}`);
+      assert.ok(typeof tr._uiStrings.en[k] === 'string' && tr._uiStrings.en[k].length > 0, `英文字典应含 ${k}`);
+      const cz = (tr._uiStrings.zh[k].match(/%s/g) || []).length;
+      const ce = (tr._uiStrings.en[k].match(/%s/g) || []).length;
+      assert.strictEqual(ce, cz, `${k} 中英 %s 个数应一致`);
+    }
+    ok(`字典：本轮 ${keys20.length} 个新 key 中英齐全、%s 个数一致`);
+  }
+  // 20i. 设置页只读：loadSettings 只调只读接口；渲染层无任何写操作入口；发件箱不碰 localStorage。
+  {
+    const loadSettingsSrc = extractFn20('loadSettings');
+    for (const api of ['api.accounts', 'api.workspaceBindings', 'api.outboxStatus', 'session.get']) {
+      assert.ok(loadSettingsSrc.includes(api), `loadSettings 应调只读接口 ${api}`);
+    }
+    for (const w of ['rotate', 'revoke', 'workspaceUnlink', 'updateMe', 'token/rotate']) {
+      assert.ok(!loadSettingsSrc.includes(w), `loadSettings 不应含写操作 ${w}`);
+    }
+    assert.ok(!rendererSrc20.includes('workspace-unlink'), '渲染层不应调解绑');
+    assert.ok(!rendererSrc20.includes('token/rotate'), '渲染层不应调换 token');
+    assert.ok(!mainSrc20.includes("'api:settings"), 'main 不应有 settings 写 IPC');
+    assert.ok(!outboxSrc20.includes('localStorage.'), '发件箱（已提交消息）不应读写 localStorage（草稿才用）');
+    ok('设置页只读：只调只读接口、无写操作入口、发件箱与草稿存储分离');
+  }
+  // 20j. 面板与语言切换：showPane 开通知/设置面板并拉取；syncChrome 只重画不重拉；mention 事件实时刷徽标；草稿存取接线。
+  {
+    const showPaneSrc = extractFn20('showPane');
+    assert.ok(showPaneSrc.includes("'pane-notif'"), 'showPane 应切通知面板');
+    assert.ok(showPaneSrc.includes("'pane-settings'"), 'showPane 应切设置面板');
+    assert.ok(showPaneSrc.includes('loadNotifications()'), '开通知面板应拉通知');
+    assert.ok(showPaneSrc.includes('loadSettings()'), '开设置面板应拉设置');
+    const syncChromeSrc = extractFn20('syncChrome');
+    assert.ok(syncChromeSrc.includes('renderNotifList()'), 'syncChrome 应重画通知列表');
+    assert.ok(syncChromeSrc.includes('renderSettings()'), 'syncChrome 应重画设置页');
+    assert.ok(syncChromeSrc.includes('renderOutboxLine()'), 'syncChrome 应重画发件箱状态行');
+    assert.ok(!syncChromeSrc.includes('loadNotifications()'), '语言切换不应重拉通知（只重画）');
+    assert.ok(!syncChromeSrc.includes('loadSettings()'), '语言切换不应重拉设置（只重画）');
+    assert.ok(rendererSrc20.includes('loadNotifications().catch(() => {})'), 'mention 事件到时应实时刷通知徽标');
+    assert.ok(rendererSrc20.includes('loadDraft(draftKeyForOpen())'), '切会话应恢复该会话草稿');
+    assert.ok(rendererSrc20.includes('clearDraft(draftKeyForOpen())'), '发送后应清会话草稿');
+    assert.ok(rendererSrc20.includes("clearDraft('post:'"), '发帖后应清帖子草稿');
+    // 回归：首开帖子页时框是空的，空串不能清键，否则跨重启的帖子草稿
+    // 还没恢复就被删掉（v0.3.15 走查前自查发现）。
+    assert.ok(showPaneSrc.includes("if (curPostDraft) saveDraft('post:'"), '切帖子页时框空不应存草稿（空串会误删未恢复的草稿）');
+    ok('面板与语言切换：showPane 拉取 / syncChrome 只重画 / mention 实时刷徽标 / 草稿存取接线');
   }
 
   console.log(`\nPASS: ${passed} 项全过`);

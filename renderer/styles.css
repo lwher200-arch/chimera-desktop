@@ -342,6 +342,37 @@ select {
 }
 .unread:empty { display: none; }
 
+/* 通知铃铛（v0.3.15）：角标红点，空时隐藏 */
+.notif-bell { position: relative; }
+.notif-badge {
+  position: absolute; top: -5px; right: -5px;
+  min-width: 16px; height: 16px; padding: 0 4px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, #ff7a59, #e5484d); color: #fff;
+  font-size: 10px; font-weight: 700; border-radius: 999px;
+  box-shadow: 0 2px 8px rgba(229, 72, 77, 0.45);
+}
+.notif-badge:empty { display: none; }
+
+/* 通知条目（v0.3.15）：与 .item 同构，点开跳目标；未读描红边 */
+.notif-item {
+  display: flex; gap: 10px; align-items: flex-start;
+  padding: 10px; border-radius: var(--r-md); cursor: pointer;
+  border: 1px solid transparent; transition: background 0.15s, border-color 0.15s;
+}
+.notif-item:hover { background: var(--surface-2); }
+.notif-item.unread-item { border-color: rgba(229, 72, 77, 0.35); }
+.notif-item .notif-preview { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+.notif-item .notif-time { color: var(--muted); font-size: 12px; }
+
+/* 发件箱状态行（v0.3.15）：输入框/发帖框下方的待发提示 */
+.outbox-line { padding: 6px 16px; font-size: 12px; color: var(--muted); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+/* 设置分区（v0.3.15）：标题 + stat-card 网格，只读展示 */
+.settings-sec { margin: 4px 12px 16px; }
+.settings-sec h3 { margin: 0 0 8px; font-size: 13px; color: var(--muted); }
+.settings-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
+
 /* 聊天 */
 #chatPane { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--chat-bg); }
 #chatHead {

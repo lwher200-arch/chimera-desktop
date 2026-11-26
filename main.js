@@ -16,7 +16,8 @@
 const path = require('path');
 const { app, BrowserWindow, ipcMain, safeStorage } = require('electron');
 const { Store } = require('./lib/store');
-const { ForumClient } = require('./lib/forumClient');
+const { ForumClient, ForumApiError } = require('./lib/forumClient');
+const { Outbox, isNetworkError } = require('./lib/outbox');
 const { RealtimeClient } = require('./lib/realtimeClient');
 const { NodeManager } = require('./lib/nodeManager');
 const { ServerResolver, PRIMARY_BASE } = require('./lib/serverResolver');
@@ -42,6 +43,8 @@ let client = null;
 let realtime = null;
 let nodeManager = null;
 let updater = null;
+let outbox = null; // 离线发件箱（v0.3.15）：lib/outbox.js，主进程持有
+let outboxFlushTimer = null; // 有待发条目时的 60 秒重试定时器
 let lastTransport = null; // 最近一次 realtime:transport，供窗口加载完后补发
 // 工作区绑定（融合 P0）：活跃绑定 id + 每 5 分钟 seen 心跳定时器。
 // seen 只在“有活跃绑定且会话有效”时调，失败静默等下次；私钥/签名绝不进日志。
@@ -187,6 +190,8 @@ function startRealtime() {
   realtime.on('connect', ({ transport }) => {
     console.log('[realtime] transport:', transport);
     sendToRenderer('sse:connect', { at: new Date().toISOString(), transport });
+    // 重连成功：发件箱有待发条目就补发（v0.3.15，断网自动发）。
+    if (outbox) outbox.flush().catch(() => {});
   });
   realtime.on('disconnect', (err) => sendToRenderer('sse:disconnect', { error: String(err && err.message || err) }));
   realtime.on('transport', (payload) => {
@@ -211,6 +216,60 @@ function startRealtime() {
 
 function stopRealtime() {
   if (realtime) { try { realtime.stop(); } catch {} realtime = null; }
+}
+
+// ---- 离线发件箱（v0.3.15）：send 按 kind 分发到 ForumClient；
+// onChange 推给渲染进程（outbox:status），有待发条目时起 60 秒重试定时器。
+function initOutbox() {
+  outbox = new Outbox({
+    store,
+    send: async (entry) => {
+      const token = sessionToken();
+      if (!token) throw new ForumApiError('ERR_NEED_LOGIN', 401);
+      if (entry.kind === 'group-message') return client.sendGroupMessage(entry.target.groupId, token, entry.body, entry.attachments || []);
+      if (entry.kind === 'dm') return client.sendDm(entry.target.peer, token, entry.body, entry.attachments || []);
+      if (entry.kind === 'post') return client.createPost(token, { board: entry.target.board || null, title: entry.title || '', body: entry.body, replyTo: entry.target.replyTo || null });
+      if (entry.kind === 'community-post') return client.createCommunityPost(token, entry.target.communityId, { title: entry.title || '', body: entry.body });
+      throw new ForumApiError('未知的发件箱类型', 400, 'ERR_OUTBOX_UNKNOWN_KIND');
+    },
+    onChange: (status) => {
+      sendToRenderer('outbox:status', status);
+      if (status.total > 0) armOutboxFlushTimer();
+      else disarmOutboxFlushTimer();
+    },
+  });
+}
+
+function armOutboxFlushTimer() {
+  if (outboxFlushTimer || !outbox || !outbox.entries.length) return;
+  outboxFlushTimer = setInterval(() => {
+    if (!outbox || !outbox.entries.length) { disarmOutboxFlushTimer(); return; }
+    outbox.flush().catch(() => {});
+  }, 60 * 1000);
+  if (outboxFlushTimer.unref) outboxFlushTimer.unref();
+}
+
+function disarmOutboxFlushTimer() {
+  if (outboxFlushTimer) { clearInterval(outboxFlushTimer); outboxFlushTimer = null; }
+}
+
+// 发送入箱（v0.3.15）：只在网络层失败时入箱并返回 {queued: true}；
+// HTTP 错原样抛（POST 可能已落库，重发会重复）。成功原样返回服务端回包。
+// route 是路由信息（groupId/peer/board/replyTo/communityId），
+// body/title/attachments 单独传，存进条目的对应字段。
+async function sendOrQueue(kind, route, body, title, attachments, attempt) {
+  try {
+    return await attempt();
+  } catch (err) {
+    if (!isNetworkError(err)) throw err;
+    const target = {};
+    for (const k of ['groupId', 'peer', 'board', 'replyTo', 'communityId']) {
+      if (route[k] !== undefined && route[k] !== null) target[k] = route[k];
+    }
+    const entry = outbox.enqueue({ kind, target, body, title: title || '', attachments: attachments || [] });
+    armOutboxFlushTimer();
+    return { queued: true, clientId: entry.clientId };
+  }
 }
 
 // ---- light node: switch is persisted; auto-start on launch if enabled ----
@@ -286,14 +345,16 @@ function registerIpc() {
   apiHandle('api:group-messages', (_e, { groupId, since, limit, before_id }) =>
     client.getGroupMessages(groupId, sessionToken(), { since, limit, before_id }));
   apiHandle('api:send-group-message', (_e, { groupId, body, attachments }) =>
-    client.sendGroupMessage(groupId, sessionToken(), body, attachments || []));
+    sendOrQueue('group-message', { groupId }, body, '', attachments || [],
+      () => client.sendGroupMessage(groupId, sessionToken(), body, attachments || [])));
   apiHandle('api:read', (_e, { groupId, seq }) =>
     client.markGroupRead(sessionToken(), groupId, seq));
   apiHandle('api:dms', () => client.getDms(sessionToken()));
   apiHandle('api:dm-history', (_e, { peer, since, limit, before_id }) =>
     client.getDmHistory(peer, sessionToken(), { since, limit, before_id }));
   apiHandle('api:send-dm', (_e, { peer, body, attachments }) =>
-    client.sendDm(peer, sessionToken(), body, attachments || []));
+    sendOrQueue('dm', { peer }, body, '', attachments || [],
+      () => client.sendDm(peer, sessionToken(), body, attachments || [])));
   apiHandle('api:posts', (_e, opts) => client.getPosts(sessionToken(), opts || {}));
   // 翻译（v0.3.1）：单条 + 批量，走 /api/translate（带 session token）。
   // 429 归一化（v0.3.13）：服务端单条限流回 HTTP 429、批量回 200+rate_limited；
@@ -330,7 +391,8 @@ function registerIpc() {
   apiHandle('api:community-posts', (_e, { id, limit, q }) =>
     client.getCommunityPosts(sessionToken(), id, { limit, q }));
   apiHandle('api:create-community-post', (_e, { id, title, body }) =>
-    client.createCommunityPost(sessionToken(), id, { title, body }));
+    sendOrQueue('community-post', { communityId: id }, body, title || '', [],
+      () => client.createCommunityPost(sessionToken(), id, { title, body })));
   apiHandle('api:create-community-announcement', (_e, { id, body }) =>
     client.createCommunityAnnouncement(sessionToken(), id, body));
   apiHandle('api:delete-community-announcement', (_e, { id, annId }) =>
@@ -345,7 +407,8 @@ function registerIpc() {
     client.setCommunityGroups(sessionToken(), id, groups));
   // 帖子互动（v0.3.4）：点赞 / 置顶 / 删帖 + 回复（createPost 已有，reply_to 继承 team_id）。
   apiHandle('api:create-post', (_e, { board, title, body, replyTo }) =>
-    client.createPost(sessionToken(), { board, title, body, replyTo }));
+    sendOrQueue('post', { board, replyTo }, body, title || '', [],
+      () => client.createPost(sessionToken(), { board, title, body, replyTo })));
   apiHandle('api:like-post', (_e, { id }) => client.likePost(sessionToken(), id));
   apiHandle('api:pin-post', (_e, { id, pinned }) => client.pinPost(sessionToken(), id, pinned));
   apiHandle('api:delete-post', (_e, { id }) => client.deletePost(sessionToken(), id));
@@ -355,6 +418,32 @@ function registerIpc() {
   apiHandle('api:toggle-follow', (_e, { name }) => client.toggleFollow(sessionToken(), name));
   apiHandle('api:following-feed', (_e, { limit, before_id, since }) => client.getFollowingFeed(sessionToken(), { limit, before_id, since }));
   apiHandle('api:update-me', (_e, { patch }) => client.updateMe(sessionToken(), patch));
+  // ---- 通知中心（v0.3.15，只做 @提醒） ----
+  // GET /api/notifications 回 {ok, notifications, unreadCount}；桌面端只展示
+  // type === 'mention' 的条目（见 renderer filterMentionNotifications）。
+  // unreadCount 是全部类型的未读数，@未读数由渲染进程按本地水位另算；
+  // 本地水位 readTs + @提醒开关一并回给渲染进程。
+  apiHandle('api:notifications', async () => {
+    const data = await client.getNotifications(sessionToken());
+    return {
+      ...(data || {}),
+      readTs: (store.state.notif && store.state.notif.readTs) || null,
+      mentionEnabled: !(store.state.notif && store.state.notif.mentionEnabled === false),
+    };
+  });
+  // 全部已读：POST /api/notifications/read 写服务端水位，本地水位同步存一份。
+  apiHandle('api:notifications-read', async () => {
+    const data = await client.markNotificationsRead(sessionToken());
+    const readTs = (data && data.notifReadTs) || new Date().toISOString();
+    store.update((s) => { s.notif.readTs = readTs; });
+    return { ...(data || {}), readTs };
+  });
+  // ---- 发件箱（v0.3.15）：状态查询 + 丢弃 dead 条目（本地操作，不碰服务端） ----
+  apiHandle('api:outbox-status', () => (outbox ? outbox.status() : { pending: 0, failed: 0, total: 0, entries: [] }));
+  apiHandle('api:outbox-discard', (_e, { clientId } = {}) => {
+    if (!outbox || !clientId) return false;
+    return outbox.discard(clientId);
+  });
   // ---- 工作区绑定（融合 P0）：登记 + 只读在线状态 ----
   // api:workspace-challenge：取一次性挑战（5 分钟过期）。
   apiHandle('api:workspace-challenge', () => client.workspaceChallenge(sessionToken()));
@@ -545,6 +634,7 @@ if (!gotSingleInstanceLock) {
     return;
   }
   createWindow();
+  initOutbox();
   registerIpc();
   startRealtime();
   updater.startPeriodicCheck(); // 启动 15 秒后查一次，之后每 6 小时查一次
