@@ -59,6 +59,10 @@ function errText(err) {
 // 的 limit 上限就是 100，再大也会被截到 100）。
 const MAX_RENDERED = 300;
 const PAGE_SIZE = 100;
+// 主帖子页：每页拉多少条（与旧版首屏 30 条一致）；与消息列表同口径：
+// before_id 向前翻 + since 增量拉新（服务端 paginate / since 均已核实）。
+const FEED_PAGE_SIZE = 30;
+const FEED_MAX_AUTO_PAGES = 5; // “加载更多”一次点击最多自动续拉几页（板块过滤整页被滤掉时）
 // 贴底判定：离底部不到这么多像素就认为在看最新消息，新消息到时自动滚到底。
 const NEAR_BOTTOM_PX = 120;
 
@@ -91,6 +95,10 @@ const state = {
   showCreateTeam: false, // 是否展开新建团队表单
   postsFeed: 'all', // 主帖子页信息流：all 全部 | following 关注动态
   feedPosts: [], // 主帖子页当前列表（含置顶）
+  feedHasMore: false, // 服务端 has_more：是否还有更早的帖子可翻
+  feedLoadingOlder: false, // 正在向前翻页
+  feedCursor: null, // 已拉的最老一条流帖 id（翻页 before_id，取自原始回包、过滤前）
+  feedNewestTs: null, // 已见最新一条流帖的 ts（增量拉新 since 水位）
   searchQuery: '', // 全站搜索当前关键词
   searchResults: null, // 全站搜索结果 {posts, messages, totalPosts, totalMessages}
   homeHealth: null, // 首页统计最近一次 /api/health 回包（语言切换只重画不重拉）
@@ -186,6 +194,39 @@ function isGroupMember(g, me) {
 function filterPostsByBoard(posts, board) {
   if (!board) return posts || [];
   return (posts || []).filter((p) => p.board === board);
+}
+
+// 帖子列表纯函数（v0.3.14，可单测）：置顶恒在前，流按时间正序。
+// mergeOlderFeed：更早一页（已按板过滤）插到现有流之前、置顶之后；按 id 去重。
+function mergeOlderFeed(existing, older) {
+  const seen = new Set((existing || []).map((p) => p && p.id).filter(Boolean));
+  const fresh = (older || []).filter((p) => p && p.id && !seen.has(p.id));
+  if (!fresh.length) return (existing || []).slice();
+  const pinned = (existing || []).filter((p) => p.pinned);
+  const stream = (existing || []).filter((p) => !p.pinned);
+  return [...pinned, ...fresh, ...stream];
+}
+// mergeNewerFeed：增量拉到的新帖（已按板过滤）追加到末尾（流时间正序）；按 id 去重。
+function mergeNewerFeed(existing, newer) {
+  const seen = new Set((existing || []).map((p) => p && p.id).filter(Boolean));
+  const fresh = (newer || []).filter((p) => p && p.id && !seen.has(p.id));
+  return (existing || []).concat(fresh);
+}
+// feedCursorOf：翻页游标 = 原始回包流帖里最老一条的 id（过滤前取，免得
+// 板块过滤把最老几条滤掉后游标错位、反复拉同一页）。回包流帖按时间正序。
+function feedCursorOf(pagePosts) {
+  const list = pagePosts || [];
+  if (!list.length) return null;
+  return list[list.length - 1].id || null;
+}
+// feedNewestTsOf：增量水位 = 原始回包流帖里最新一条的 ts（过滤前取）。
+function feedNewestTsOf(pagePosts) {
+  const list = pagePosts || [];
+  let ts = null;
+  for (const p of list) {
+    if (p && p.ts && (!ts || Date.parse(p.ts) > Date.parse(ts))) ts = p.ts;
+  }
+  return ts;
 }
 
 // 工作区绑定（融合 P0，纯函数，Node 可测）：指纹 = keyId 去掉 'ed25519-'
@@ -927,21 +968,130 @@ function renderFeedPosts() {
   if (window.ChimeraTranslate && window.ChimeraTranslate.observeNameTranslations) window.ChimeraTranslate.observeNameTranslations(document);
 }
 
+// 帖子页统一取页：all 走 GET /api/posts，following 走 /api/feed/following；
+// 两者同走服务端 splitPinned/paginate（before_id + limit + since 均支持）。
+async function fetchFeedPage(opts) {
+  return state.postsFeed === 'following'
+    ? window.chimera.api.followingFeed(opts)
+    : window.chimera.api.posts(opts);
+}
+
 async function loadPosts() {
   const box = $('postsList');
   if (!box) return;
   syncFeedTabs();
   try {
-    const data = state.postsFeed === 'following'
-      ? await window.chimera.api.followingFeed({ limit: 30 })
-      : await window.chimera.api.posts({ limit: 30 });
+    const data = await fetchFeedPage({ limit: FEED_PAGE_SIZE });
     const all = [...(data.pinned || []), ...(data.posts || [])];
     state.feedPosts = filterPostsByBoard(all, state.postsBoard);
+    // 游标与水位取自原始回包（过滤前），免得板块过滤后错位。
+    state.feedCursor = feedCursorOf(data.posts || []);
+    const newest = feedNewestTsOf(data.posts || []);
+    if (newest) state.feedNewestTs = newest;
+    state.feedHasMore = !!(data && data.has_more);
     renderFeedPosts();
+    syncFeedOlderButton();
   } catch (err) {
     // 帖子拉失败只影响帖子列表本身：板块栏是 loadBoards 常驻的，不动它。
     box.innerHTML = `<div class="muted" style="padding:12px">${ui('posts.loadFail')}${esc(err.message || err)}</div>`;
   }
+}
+
+// 向前翻一页：用最老一条流帖的 id 当 before_id，服务端只回它之前的
+// FEED_PAGE_SIZE 条；新卡插到置顶之后、现有流之前（不重建整个列表，
+// 只给新卡入队翻译）。板块过滤整页被滤掉时自动续拉（最多 5 页），
+// 免得点一次什么都没多出来。DOM 不设上限：总量受服务端帖子数约束
+// （约 500 张卡），且 v0.3.14 起屏外翻译占位不再入队，成本只有 DOM 节点。
+async function loadOlderPosts() {
+  if (state.feedLoadingOlder || !state.feedHasMore || !state.feedCursor) return;
+  state.feedLoadingOlder = true;
+  syncFeedOlderButton();
+  try {
+    let added = [];
+    let pages = 0;
+    while (pages < FEED_MAX_AUTO_PAGES) {
+      pages += 1;
+      const data = await fetchFeedPage({ limit: FEED_PAGE_SIZE, before_id: state.feedCursor });
+      const raw = data.posts || [];
+      state.feedCursor = feedCursorOf(raw) || state.feedCursor;
+      state.feedHasMore = !!(data && data.has_more);
+      const visible = filterPostsByBoard(raw, state.postsBoard);
+      if (visible.length) { added = visible; break; }
+      if (!state.feedHasMore || !raw.length) break;
+    }
+    if (added.length) {
+      // 防御去重：before_id 游标保证页与页不重叠，但刷新并发时仍可能撞上
+      // 已有卡；只插确实新的卡，DOM 与 state.feedPosts 保持一致。
+      const seenIds = new Set(state.feedPosts.map((x) => x && x.id).filter(Boolean));
+      const fresh = added.filter((x) => x && x.id && !seenIds.has(x.id));
+      if (!fresh.length) return;
+      const firstStreamId = (state.feedPosts.find((p) => !p.pinned) || {}).id || null;
+      state.feedPosts = mergeOlderFeed(state.feedPosts, fresh);
+      insertFeedCards(fresh, firstStreamId);
+    }
+  } catch { /* 翻页失败不清空已有内容，按钮还在，下次再点 */ }
+  finally {
+    state.feedLoadingOlder = false;
+    syncFeedOlderButton();
+  }
+}
+
+function syncFeedOlderButton() {
+  const row = $('feedOlderRow');
+  const btn = $('feedOlderBtn');
+  if (!row || !btn) return;
+  const show = state.feedHasMore || state.feedLoadingOlder;
+  row.classList.toggle('hidden', !show);
+  btn.disabled = state.feedLoadingOlder || !state.feedHasMore;
+  btn.textContent = state.feedLoadingOlder ? ui('posts.loading') : ui('posts.loadOlder');
+}
+
+$('feedOlderBtn').addEventListener('click', loadOlderPosts);
+
+// 只插新卡：更早一页插到第一张流卡之前（置顶之后），新帖追加到末尾；
+// 只给新卡入队翻译，不重扫整个列表。
+function insertFeedCards(posts, beforeId) {
+  const box = $('postsList');
+  if (!box || !posts.length) return;
+  const empty = box.querySelector('.empty-note');
+  if (empty) empty.remove();
+  const me = state.me;
+  const owner = isForumOwner(me);
+  const html = posts.map((p) => {
+    const mine = me && p.author === me.username;
+    return postCardHtml(p, mine || owner);
+  }).join('');
+  if (beforeId) {
+    const anchor = box.querySelector('[data-post="' + beforeId + '"]');
+    if (anchor && anchor.insertAdjacentHTML) anchor.insertAdjacentHTML('beforebegin', html);
+    else box.insertAdjacentHTML('afterbegin', html);
+  } else {
+    box.insertAdjacentHTML('beforeend', html);
+  }
+  if (window.ChimeraTranslate) window.ChimeraTranslate.observeTranslations(box);
+  if (window.ChimeraTranslate && window.ChimeraTranslate.observeNameTranslations) window.ChimeraTranslate.observeNameTranslations(document);
+}
+
+// 增量拉新：SSE 新帖事件只拉 since= 水位之后的新帖，追加到末尾，不重建
+// 整个列表、不重入队已有卡的翻译。since 回包不带置顶（服务端 hasFilter
+// 口径），正好只要流帖。raw 为空时全量重拉一次（防同毫秒撞 ts 漏帖）；
+// raw 有数但全被板块过滤掉时是预期内，不重拉。
+async function fetchNewFeedPosts() {
+  if (!state.feedNewestTs) { await loadPosts(); return; }
+  try {
+    const data = await fetchFeedPage({ since: state.feedNewestTs });
+    const raw = data.posts || [];
+    if (!raw.length) { await loadPosts(); return; }
+    const newest = feedNewestTsOf(raw);
+    if (newest) state.feedNewestTs = newest;
+    const visible = filterPostsByBoard(raw, state.postsBoard);
+    // 防御去重：刷新并发时 since 回包可能撞上已在列表里的卡，只插新的。
+    const seenIds = new Set(state.feedPosts.map((x) => x && x.id).filter(Boolean));
+    const fresh = visible.filter((x) => x && x.id && !seenIds.has(x.id));
+    if (!fresh.length) return;
+    state.feedPosts = mergeNewerFeed(state.feedPosts, fresh);
+    insertFeedCards(fresh, null);
+  } catch { try { await loadPosts(); } catch { /* 下次事件再试 */ } }
 }
 
 // 主帖子页写操作：发帖框 + 帖子卡片委托（与团队讨论共用 handlePostAction）。
@@ -1816,7 +1966,7 @@ window.chimera.onSseEvent(async ({ event, data, seq }) => {
     return;
   }
   if (event === 'post_created' || event === 'reply_created') {
-    if (!$('pane-posts').classList.contains('hidden')) loadPosts();
+    if (!$('pane-posts').classList.contains('hidden')) fetchNewFeedPosts();
     return;
   }
   if (event === 'mention') {

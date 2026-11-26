@@ -4109,6 +4109,351 @@ async function main() {
     ok('ForumClient 翻译 429：单条/批量均抛 status 429；main 归一化接线齐全');
   }
 
+  console.log('== 19. v0.3.14：帖子分页 + 增量追加 / 翻译视口内入队 ==');
+  // 19a. 帖子合并纯函数：更早插置顶后、新帖追加末尾、去重、游标、水位。
+  {
+    const mergeOlderFeed = new Function(`${extractFn18('mergeOlderFeed')}; return mergeOlderFeed;`)();
+    const mergeNewerFeed = new Function(`${extractFn18('mergeNewerFeed')}; return mergeNewerFeed;`)();
+    const feedCursorOf = new Function(`${extractFn18('feedCursorOf')}; return feedCursorOf;`)();
+    const feedNewestTsOf = new Function(`${extractFn18('feedNewestTsOf')}; return feedNewestTsOf;`)();
+    const p = (id, ts, pinned) => ({ id, ts, pinned: !!pinned, board: 'general' });
+    assert.deepStrictEqual(
+      mergeOlderFeed([p('a', 't', true), p('b', 't'), p('c', 't')], [p('x', 't'), p('y', 't')]).map((x) => x.id),
+      ['a', 'x', 'y', 'b', 'c'], '更早一页应插到置顶之后、现有流之前');
+    assert.deepStrictEqual(
+      mergeOlderFeed([p('a', 't', true), p('b', 't')], [p('b', 't'), p('z', 't')]).map((x) => x.id),
+      ['a', 'z', 'b'], '重复 id 去重后保留旧卡原位，新页卡插到现有流之前');
+    assert.deepStrictEqual(mergeOlderFeed([p('a', 't')], []).map((x) => x.id), ['a'], '空页不应改动');
+    assert.deepStrictEqual(
+      mergeNewerFeed([p('a', 't', true), p('b', 't')], [p('d', 't'), p('b', 't')]).map((x) => x.id),
+      ['a', 'b', 'd'], '新帖应追加到末尾并去重');
+    assert.strictEqual(feedCursorOf([p('a', 't'), p('b', 't'), p('c', 't')]), 'c', '游标应是最老一条（末尾）');
+    assert.strictEqual(feedCursorOf([]), null, '空页游标为 null');
+    assert.strictEqual(feedNewestTsOf([p('a', '2026-11-26T01:00'), p('b', '2026-11-26T03:00'), p('c', '2026-11-26T02:00')]), '2026-11-26T03:00', '水位应取最大 ts');
+    ok('帖子合并纯函数：更早插置顶后/新帖追加末尾/去重/游标取末尾/水位取最大');
+  }
+  // 19b. ForumClient：getPosts 透传 before_id；getFollowingFeed 透传 since/before_id。
+  {
+    const mock = await new Promise((resolve) => {
+      const seen = [];
+      const server = http.createServer((req, res) => {
+        seen.push(req.url);
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ ok: true, posts: [], pinned: [], has_more: false }));
+      });
+      server.listen(0, '127.0.0.1', () => resolve({ server, base: `http://127.0.0.1:${server.address().port}`, seen }));
+    });
+    try {
+      const mc = new ForumClient(mock.base);
+      await mc.getPosts('tok-x', { limit: 30, before_id: 'pmw-oldest' });
+      await mc.getFollowingFeed('tok-x', { since: '2026-11-26T02:00:00Z' });
+      await mc.getFollowingFeed('tok-x', { limit: 30, before_id: 'pmw-oldest2' });
+      assert.ok(mock.seen[0].includes('before_id=pmw-oldest') && mock.seen[0].includes('limit=30'), `getPosts 应透传 before_id，实际 ${mock.seen[0]}`);
+      assert.ok(decodeURIComponent(mock.seen[1]).includes('since=2026-11-26T02:00:00Z'), `getFollowingFeed 应透传 since，实际 ${mock.seen[1]}`);
+      assert.ok(mock.seen[2].includes('before_id=pmw-oldest2'), `getFollowingFeed 应透传 before_id，实际 ${mock.seen[2]}`);
+    } finally { mock.server.close(); }
+    ok('ForumClient：getPosts 透传 before_id；getFollowingFeed 透传 since/before_id');
+  }
+  // 19c. 帖子分页接线：翻页/拉新/SSE/按钮/字典/main 透传齐全。
+  {
+    assert.ok(rendererSrc18.includes('function loadOlderPosts()'), '应有 loadOlderPosts');
+    assert.ok(rendererSrc18.includes('before_id: state.feedCursor'), '翻页应用 feedCursor 当 before_id');
+    assert.ok(rendererSrc18.includes('function fetchNewFeedPosts()'), '应有 fetchNewFeedPosts');
+    assert.ok(rendererSrc18.includes('since: state.feedNewestTs'), '拉新应用 feedNewestTs 当 since');
+    const sseIdx = rendererSrc18.indexOf("event === 'post_created'");
+    assert.ok(sseIdx >= 0, '应有 post_created 事件分支');
+    const sseWin = rendererSrc18.slice(sseIdx, sseIdx + 300);
+    assert.ok(sseWin.includes('fetchNewFeedPosts()'), 'SSE 新帖应走增量拉新');
+    assert.ok(!sseWin.includes('loadPosts()'), 'SSE 新帖不应再全量 loadPosts');
+    assert.ok(html18.includes('id="feedOlderRow"'), '应有 feedOlderRow');
+    assert.ok(html18.includes('id="feedOlderBtn"'), '应有 feedOlderBtn');
+    assert.ok(html18.includes('data-i18n="posts.loadOlder"'), '翻页按钮应走字典 posts.loadOlder');
+    assert.ok(rendererSrc18.includes('function syncFeedOlderButton()'), '应有 syncFeedOlderButton');
+    assert.ok(rendererSrc18.includes("addEventListener('click', loadOlderPosts)"), '翻页按钮应绑 loadOlderPosts');
+    assert.ok(tr._uiStrings.zh['posts.loadOlder'] && tr._uiStrings.en['posts.loadOlder'], '字典中英应含 posts.loadOlder');
+    assert.ok(tr._uiStrings.zh['posts.loading'] && tr._uiStrings.en['posts.loading'], '字典中英应含 posts.loading');
+    assert.ok(mainSrc18.includes("apiHandle('api:following-feed', (_e, { limit, before_id, since })"), 'main following-feed 应透传 since');
+    ok('帖子分页接线：翻页/拉新/SSE/按钮/字典/main 透传齐全');
+  }
+  // 19d. insertFeedCards（假 DOM）：更早插锚点前、新帖追加末尾、清掉空态、只扫新卡。
+  {
+    const prevDoc19d = globalThis.document;
+    globalThis.document = {};
+    try {
+      const calls19d = [];
+      let observed19d = 0;
+      let emptyRemoved19d = false;
+      const anchor19d = { insertAdjacentHTML(pos, html) { calls19d.push(['anchor', pos, html]); } };
+      const fakeBox19d = {
+        insertAdjacentHTML(pos, html) { calls19d.push(['box', pos, html]); },
+        querySelector(sel) {
+          if (sel === '.empty-note') return { remove() { emptyRemoved19d = true; } };
+          if (sel === '[data-post="b"]') return anchor19d;
+          return null;
+        },
+      };
+      const fakeWin19d = { ChimeraTranslate: { observeTranslations: () => { observed19d += 1; }, observeNameTranslations: () => {} } };
+      const insertFeedCards = new Function('postCardHtml', 'state', '$', 'window', 'isForumOwner',
+        `${extractFn18('insertFeedCards')}; return insertFeedCards;`)(
+        (p) => `<div class="post-card" data-post="${p.id}">${p.id}</div>`,
+        { me: { username: 'coldhao' } },
+        () => fakeBox19d,
+        fakeWin19d,
+        () => true);
+      insertFeedCards([{ id: 'x' }, { id: 'y' }], 'b');
+      assert.ok(calls19d.some((c) => c[0] === 'anchor' && c[1] === 'beforebegin' && c[2].includes('data-post="x"') && c[2].includes('data-post="y"')), '更早一页应插到第一张流卡之前');
+      assert.strictEqual(emptyRemoved19d, true, '插卡时应清掉空态提示');
+      assert.strictEqual(observed19d, 1, '插卡后应只给新卡入队翻译');
+      insertFeedCards([{ id: 'z' }], null);
+      assert.ok(calls19d.some((c) => c[0] === 'box' && c[1] === 'beforeend' && c[2].includes('data-post="z"')), '新帖应追加到列表末尾');
+      assert.strictEqual(observed19d, 2, '每次插卡都应入队一次翻译扫描');
+      ok('insertFeedCards：更早插锚点前/新帖追加末尾/清空态/只扫新卡');
+    } finally {
+      if (prevDoc19d === undefined) delete globalThis.document; else globalThis.document = prevDoc19d;
+    }
+  }
+  // 19e. 视口内入队：屏外不入队、进视口才入队；缓存/429/名字/重试语义不变。
+  {
+    const sleep19 = sleep18;
+    const prevIO19 = globalThis.IntersectionObserver;
+    const prevDoc19 = globalThis.document;
+    // 假 IntersectionObserver：记录观察目标，测试手动触发进视口。
+    const observers19 = [];
+    class FakeIO19 {
+      constructor(cb) { this.cb = cb; this.targets = new Set(); observers19.push(this); }
+      observe(t) { this.targets.add(t); }
+      unobserve(t) { this.targets.delete(t); }
+      disconnect() { this.targets.clear(); }
+      trigger(ids) {
+        const entries = [...this.targets].filter((t) => ids.includes(t.getAttribute('data-trid'))).map((t) => ({ isIntersecting: true, target: t }));
+        if (entries.length) this.cb(entries);
+      }
+    }
+    try {
+      // e1. 无 IO 时回落立即入队（旧行为）。
+      if ('IntersectionObserver' in globalThis) delete globalThis.IntersectionObserver;
+      if (typeof globalThis.document === 'undefined') globalThis.document = { contains: () => true };
+      tr._resetForTest();
+      tr.setViewerLang('zh');
+      let callsE1 = 0;
+      tr.setBatchFn(async (items) => { callsE1 += 1; return items.map((it) => ({ translated: `译：${it.text}`, same: false })); });
+      const boxE1 = makeBox18(tr.placeholder('English viewport fallback immediate test.').match(/data-trid="(at\d+)"/)[1]);
+      tr.observeTranslations({ querySelectorAll: () => [boxE1] });
+      await sleep19(600);
+      assert.strictEqual(callsE1, 1, '无 IO 时应立即入队并调接口');
+      assert.ok(boxE1._html.includes('译：English viewport fallback'), '无 IO 时应渲染译文');
+      ok('视口回落：无 IntersectionObserver 时立即入队（旧行为）');
+      // e2-e3. 有 IO：屏外不入队、进视口才入队；缓存命中不调接口。
+      globalThis.IntersectionObserver = FakeIO19;
+      tr._resetForTest();
+      let calls = 0;
+      tr.setBatchFn(async (items) => { calls += 1; return items.map((it) => ({ translated: `译：${it.text}`, same: false })); });
+      const boxes = [];
+      const root = { querySelectorAll: () => boxes.filter((b) => !b._removed && b.getAttribute('data-trid')) };
+      for (let i = 0; i < 3; i++) {
+        boxes.push(makeBox18(tr.placeholder(`English viewport message number ${i} for test.`).match(/data-trid="(at\d+)"/)[1]));
+      }
+      tr.observeTranslations(root);
+      await sleep19(600);
+      assert.strictEqual(calls, 0, '屏外占位不应入队、不应调接口');
+      assert.strictEqual(tr._pendingViewport(), 3, '3 个占位应都在待观察');
+      observers19[observers19.length - 1].trigger([boxes[0].getAttribute('data-trid')]);
+      await sleep19(600);
+      assert.strictEqual(calls, 1, '进视口 1 个应只调一次接口');
+      assert.ok(boxes[0]._html.includes('译：English viewport message number 0'), '进视口的应渲染译文');
+      assert.strictEqual(tr._pendingViewport(), 2, '剩下 2 个仍待观察');
+      assert.ok(!boxes[1]._html.includes('译：'), '未进视口的不应渲染');
+      observers19[observers19.length - 1].trigger([boxes[1].getAttribute('data-trid'), boxes[2].getAttribute('data-trid')]);
+      await sleep19(600);
+      assert.strictEqual(calls, 2, '剩下 2 个进视口应再调一次（同一批）');
+      assert.strictEqual(tr._pendingViewport(), 0, '全部进视口后待观察应清零');
+      ok('视口入队：屏外不入队、进视口才入队、逐个触发');
+      const cacheBox = makeBox18(tr.placeholder('English viewport message number 0 for test.').match(/data-trid="(at\d+)"/)[1]);
+      tr.observeTranslations({ querySelectorAll: () => [cacheBox] });
+      assert.strictEqual(tr._pendingViewport(), 1, '缓存文本的占位也应先观察');
+      observers19[observers19.length - 1].trigger([cacheBox.getAttribute('data-trid')]);
+      await sleep19(500);
+      assert.strictEqual(calls, 2, '缓存命中不应再调接口');
+      assert.ok(cacheBox._html.includes('译：English viewport message number 0'), '缓存命中进视口应直接渲染');
+      ok('视口入队 + 缓存：缓存命中不调接口，进视口即渲染');
+      // e4. 429 分流仍走：进视口后 rate_limited，50ms 后自动重试成功。
+      tr._resetForTest();
+      tr._setRetryDelayMs(50);
+      let tries = 0;
+      tr.setBatchFn(async (items) => {
+        tries += 1;
+        if (tries === 1) return items.map(() => ({ error: 'rate_limited' }));
+        return items.map((it) => ({ translated: `译：${it.text}`, same: false }));
+      });
+      const rlBox = makeBox18(tr.placeholder('English viewport rate limit retry test.').match(/data-trid="(at\d+)"/)[1]);
+      tr.observeTranslations({ querySelectorAll: () => [rlBox] });
+      assert.strictEqual(tr._pendingViewport(), 1, '429 测试占位应先观察');
+      observers19[observers19.length - 1].trigger([rlBox.getAttribute('data-trid')]);
+      await sleep19(900);
+      assert.strictEqual(tries, 2, `节流应自动重试一次，实际调了 ${tries} 次`);
+      assert.ok(rlBox._html.includes('译：English viewport rate limit'), '重试成功后应渲染译文');
+      tr._setRetryDelayMs(65000);
+      ok('视口入队 + 429 分流：rate_limited 后自动重试并渲染');
+      // e5. 脱离文档的待观察占位应被扫掉。
+      tr._resetForTest();
+      tr.setBatchFn(async (items) => items.map((it) => ({ translated: `译：${it.text}`, same: false })));
+      const staleBox = makeBox18(tr.placeholder('English viewport stale box test.').match(/data-trid="(at\d+)"/)[1]);
+      tr.observeTranslations({ querySelectorAll: () => [staleBox] });
+      assert.strictEqual(tr._pendingViewport(), 1, '应先观察 1 个');
+      globalThis.document = { contains: (el) => el !== staleBox };
+      tr.observeTranslations({ querySelectorAll: () => [] });
+      assert.strictEqual(tr._pendingViewport(), 0, '脱离文档的占位应被扫掉');
+      const freshBox = makeBox18(tr.placeholder('English viewport stale box test.').match(/data-trid="(at\d+)"/)[1]);
+      assert.notStrictEqual(freshBox.getAttribute('data-trid'), staleBox.getAttribute('data-trid'), '重建占位应是新 id');
+      globalThis.document = { contains: () => true };
+      ok('视口扫除：脱离文档的占位清 texts、不积压');
+      // e6. 名字类不走视口：有 IO 也立即入队。
+      tr._resetForTest();
+      let nameCalls = 0;
+      tr.setBatchFn(async (items) => { nameCalls += 1; return items.map((it) => ({ translated: `译名：${it.text}`, same: false })); });
+      tr.setViewerLang('en');
+      const nameEl = {
+        _text: '技术探讨',
+        dataset: {},
+        getAttribute: () => '技术探讨',
+        set textContent(v) { this._text = v; },
+        get textContent() { return this._text; },
+      };
+      tr.observeNameTranslations({ querySelectorAll: () => [nameEl] });
+      await sleep19(600);
+      assert.strictEqual(nameCalls, 1, '名字类应立即入队、不等视口');
+      assert.strictEqual(tr._pendingViewport(), 0, '名字类不应进视口观察');
+      tr.setViewerLang('zh');
+      ok('名字类不受视口影响：仍立即入队');
+      // e7. 重试按钮仍立即入队：不经视口。
+      tr._resetForTest();
+      let retryCalls = 0;
+      tr.setBatchFn(async () => { retryCalls += 1; throw new Error('network down'); });
+      const rBox = makeBox18(tr.placeholder('English viewport retry button test.').match(/data-trid="(at\d+)"/)[1]);
+      tr.observeTranslations({ querySelectorAll: () => [rBox] });
+      observers19[observers19.length - 1].trigger([rBox.getAttribute('data-trid')]);
+      await sleep19(600);
+      assert.strictEqual(retryCalls, 1, '首次应调一次接口');
+      assert.ok(rBox._html.includes('data-tr-retry'), '网络失败应留重试按钮');
+      tr.setBatchFn(async (items) => { retryCalls += 1; return items.map((it) => ({ translated: `译：${it.text}`, same: false })); });
+      const retryId = rBox._html.match(/data-tr-retry="(at\d+)"/)[1];
+      const retryBtn = {
+        getAttribute: (k) => (k === 'data-tr-retry' ? retryId : null),
+        set disabled(v) { this._disabled = v; },
+        set textContent(v) { this._text = v; },
+        closest: () => rBox,
+      };
+      tr._handleClick({ target: { closest: (sel) => (sel === '.tr-toggle' ? retryBtn : null) } });
+      await sleep19(600);
+      assert.strictEqual(retryCalls, 2, '点重试应立即再调接口');
+      assert.ok(rBox._html.includes('译：English viewport retry'), '重试成功后应渲染译文');
+      ok('重试按钮不受视口影响：点击立即再入队');
+    } finally {
+      if (prevIO19 === undefined) delete globalThis.IntersectionObserver; else globalThis.IntersectionObserver = prevIO19;
+      if (prevDoc19 === undefined) delete globalThis.document; else globalThis.document = prevDoc19;
+      tr._resetForTest();
+      tr._setRetryDelayMs(65000);
+      tr.setViewerLang('zh');
+    }
+  }
+  // 19f. fetchNewFeedPosts：增量追加末尾、去重、水位推进；raw 为空才全量重拉。
+  {
+    const mergeNewerFeed19 = new Function(`${extractFn18('mergeNewerFeed')}; return mergeNewerFeed;`)();
+    const feedNewestTsOf19 = new Function(`${extractFn18('feedNewestTsOf')}; return feedNewestTsOf;`)();
+    const filterPostsByBoard19 = new Function(`${extractFn18('filterPostsByBoard')}; return filterPostsByBoard;`)();
+    const fetchNewFeedPosts = (st, fetchStub, insertStub, loadStub) => new Function('state', 'fetchFeedPage', 'filterPostsByBoard', 'feedNewestTsOf', 'mergeNewerFeed', 'insertFeedCards', 'loadPosts',
+      `${extractFn18('fetchNewFeedPosts')}; return fetchNewFeedPosts;`)(st, fetchStub, filterPostsByBoard19, feedNewestTsOf19, mergeNewerFeed19, insertStub, loadStub);
+    const p19 = (id, ts, board) => ({ id, ts, board: board || 'general' });
+    // 新帖追加末尾并去重，水位推进；重复卡不重复插。
+    {
+      const st = { postsFeed: 'all', postsBoard: null, feedPosts: [p19('a', '2026-11-26T01:00:00Z')], feedNewestTs: '2026-11-26T01:00:00Z' };
+      let inserted = null;
+      let reloaded = 0;
+      await fetchNewFeedPosts(st,
+        async (opts) => {
+          assert.strictEqual(opts.since, '2026-11-26T01:00:00Z', '拉新应用水位当 since');
+          return { posts: [p19('b', '2026-11-26T02:00:00Z'), p19('a', '2026-11-26T01:00:00Z')] };
+        },
+        (posts) => { inserted = posts; },
+        async () => { reloaded += 1; })();
+      assert.deepStrictEqual(st.feedPosts.map((x) => x.id), ['a', 'b'], '新帖应追加到末尾');
+      assert.deepStrictEqual(inserted.map((x) => x.id), ['b'], '重复卡不应重复插入 DOM');
+      assert.strictEqual(st.feedNewestTs, '2026-11-26T02:00:00Z', '水位应推进到最新帖');
+      assert.strictEqual(reloaded, 0, '有新帖时不应全量重拉');
+      ok('fetchNewFeedPosts：增量追加末尾、去重、水位推进');
+    }
+    // raw 为空：全量重拉一次（防同毫秒撞 ts 漏帖）。
+    {
+      const st = { postsFeed: 'all', postsBoard: null, feedPosts: [p19('a', '2026-11-26T01:00:00Z')], feedNewestTs: '2026-11-26T01:00:00Z' };
+      let reloaded = 0;
+      await fetchNewFeedPosts(st, async () => ({ posts: [] }),
+        () => { throw new Error('不应插卡'); },
+        async () => { reloaded += 1; })();
+      assert.strictEqual(reloaded, 1, 'raw 为空时应全量重拉一次');
+      ok('fetchNewFeedPosts：raw 为空时全量重拉');
+    }
+    // raw 有数但全被板块过滤：不插卡、不重拉，水位照常推进。
+    {
+      const st = { postsFeed: 'all', postsBoard: 'general', feedPosts: [p19('a', '2026-11-26T01:00:00Z', 'general')], feedNewestTs: '2026-11-26T01:00:00Z' };
+      let reloaded = 0;
+      await fetchNewFeedPosts(st, async () => ({ posts: [p19('b', '2026-11-26T02:00:00Z', 'other')] }),
+        () => { throw new Error('不应插卡'); },
+        async () => { reloaded += 1; })();
+      assert.strictEqual(reloaded, 0, '全被板块过滤时不应全量重拉');
+      assert.strictEqual(st.feedNewestTs, '2026-11-26T02:00:00Z', '水位应照常推进（过滤前取）');
+      ok('fetchNewFeedPosts：全被板块过滤时不插卡、不重拉、水位推进');
+    }
+  }
+  // 19g. loadOlderPosts：整页被滤自动续拉、游标跟最后一页、5 页上限。
+  {
+    const mergeOlderFeed19 = new Function(`${extractFn18('mergeOlderFeed')}; return mergeOlderFeed;`)();
+    const feedCursorOf19 = new Function(`${extractFn18('feedCursorOf')}; return feedCursorOf;`)();
+    const filterPostsByBoard19 = new Function(`${extractFn18('filterPostsByBoard')}; return filterPostsByBoard;`)();
+    const loadOlderPosts = (st, fetchStub, insertStub) => new Function('state', 'fetchFeedPage', 'filterPostsByBoard', 'feedCursorOf', 'mergeOlderFeed', 'insertFeedCards', 'syncFeedOlderButton', 'FEED_PAGE_SIZE', 'FEED_MAX_AUTO_PAGES',
+      `${extractFn18('loadOlderPosts')}; return loadOlderPosts;`)(st, fetchStub, filterPostsByBoard19, feedCursorOf19, mergeOlderFeed19, insertStub, () => {}, 30, 5);
+    const p19 = (id, ts, board) => ({ id, ts, board: board || 'general' });
+    // 页 1 全被板块过滤、页 2 有可见卡：自动续拉 2 次，游标走到页 2 最老一条。
+    {
+      const pages = [
+        { posts: [p19('o1', 't', 'other'), p19('o2', 't', 'other')], has_more: true },
+        { posts: [p19('o3', 't', 'general'), p19('o4', 't', 'general')], has_more: true },
+      ];
+      let fetchCount = 0;
+      const fakeFetch = async (opts) => {
+        fetchCount += 1;
+        assert.strictEqual(opts.before_id, fetchCount === 1 ? 'c0' : 'o2', `第 ${fetchCount} 次应以正确游标拉`);
+        assert.strictEqual(opts.limit, 30, '每页应拉 30 条');
+        return pages[fetchCount - 1];
+      };
+      const st = { feedLoadingOlder: false, feedHasMore: true, feedCursor: 'c0', postsBoard: 'general', feedPosts: [p19('n1', 't', 'general')] };
+      let inserted = null;
+      let anchor = null;
+      await loadOlderPosts(st, fakeFetch,
+        (posts, beforeId) => { inserted = posts; anchor = beforeId; })();
+      assert.strictEqual(fetchCount, 2, '整页被滤掉时应自动续拉');
+      assert.deepStrictEqual(inserted.map((x) => x.id), ['o3', 'o4'], '只应插入可见卡');
+      assert.strictEqual(st.feedCursor, 'o4', '游标应走到最后一页最老一条');
+      assert.strictEqual(st.feedHasMore, true, 'has_more 应跟最后一页');
+      assert.deepStrictEqual(st.feedPosts.map((x) => x.id), ['o3', 'o4', 'n1'], '更早页应插到现有流之前');
+      assert.strictEqual(anchor, 'n1', 'DOM 插入锚点应是第一张现有流卡');
+      assert.strictEqual(st.feedLoadingOlder, false, '翻页结束应清 loading');
+      ok('loadOlderPosts：整页被滤自动续拉、游标跟进、锚点正确');
+    }
+    // 5 页全被滤掉：停在 5 次，不无限拉。
+    {
+      let fetchCount = 0;
+      const fakeFetch = async () => { fetchCount += 1; return { posts: [p19('z' + fetchCount, 't', 'other')], has_more: true }; };
+      const st = { feedLoadingOlder: false, feedHasMore: true, feedCursor: 'c0', postsBoard: 'general', feedPosts: [] };
+      let inserted = null;
+      await loadOlderPosts(st, fakeFetch,
+        (posts) => { inserted = posts; })();
+      assert.strictEqual(fetchCount, 5, '最多自动续拉 5 页');
+      assert.strictEqual(inserted, null, '全被滤掉时不应插卡');
+      assert.strictEqual(st.feedHasMore, true, 'has_more 仍真时按钮应保留');
+      ok('loadOlderPosts：5 页上限，不无限拉');
+    }
+  }
+
   console.log(`\nPASS: ${passed} 项全过`);
 }
 

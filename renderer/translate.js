@@ -39,6 +39,45 @@
   var batchFn = null; // (items, target) => Promise<results[]>
   var clickBound = false;
 
+  // ---------- 视口内翻译入队（v0.3.14） ----------
+  // 打开长历史时，旧做法把 up to 100 个占位瞬间全入队，首屏翻译与可见内容
+  // 抢带宽。改成只入队视口内的占位：IntersectionObserver 看到才入队，
+  // 滚动到才入队；不支持 IO 的环境（Node 测试）回落为立即入队。
+  // 名字类（observeNameTranslations）量少、不走这里，仍立即入队。
+  var viewportObserver = null; // IntersectionObserver 单例
+  var viewportObserved = {}; // id -> box（已观察、未入队）
+  function getViewportObserver() {
+    if (viewportObserver) return viewportObserver;
+    if (typeof IntersectionObserver === 'undefined') return null;
+    viewportObserver = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (!entry.isIntersecting) return;
+        var box = entry.target;
+        var id = box && box.getAttribute ? box.getAttribute('data-trid') : null;
+        if (!id || !viewportObserved[id]) return;
+        if (viewportObserver) viewportObserver.unobserve(box);
+        delete viewportObserved[id];
+        if (box.removeAttribute) box.removeAttribute('data-trid');
+        enqueue(box, id, false);
+      });
+    });
+    return viewportObserver;
+  }
+  // 扫掉已脱离文档的待观察占位（列表重建/语言切换后旧节点已不在文档里，
+  // 它的 texts 残留要清掉，免得越积越多）。隐藏面板里的占位仍在文档里，
+  // 不扫；切回来显示时观察器自会触发。
+  function sweepViewportObserved() {
+    if (typeof document === 'undefined' || !document.contains) return;
+    Object.keys(viewportObserved).forEach(function (id) {
+      var box = viewportObserved[id];
+      if (box && !document.contains(box)) {
+        if (viewportObserver) viewportObserver.unobserve(box);
+        delete viewportObserved[id];
+        delete texts[id];
+      }
+    });
+  }
+
   function viewerLang() {
     try {
       var saved = (typeof localStorage !== 'undefined') ? localStorage.getItem('chimera_lang') : null;
@@ -199,6 +238,8 @@
       'posts.emptyBoard': '该板块暂无帖子',
       'posts.emptyFollowing': '关注的人还没有发帖',
       'posts.loadFail': '加载失败：',
+      'posts.loadOlder': '加载更早的帖子',
+      'posts.loading': '加载中…',
       'posts.like': '🤍 点赞',
       'posts.liked': '❤️ 已赞',
       'posts.reply': '💬 回复',
@@ -525,6 +566,8 @@
       'posts.emptyBoard': 'No posts in this board yet',
       'posts.emptyFollowing': 'People you follow have not posted yet',
       'posts.loadFail': 'Failed to load: ',
+      'posts.loadOlder': 'Load older posts',
+      'posts.loading': 'Loading…',
       'posts.like': '🤍 Like',
       'posts.liked': '❤️ Liked',
       'posts.reply': '💬 Reply',
@@ -1050,16 +1093,25 @@
     });
   }
 
-  // 入口：接管 root 下所有未入队的翻译占位；渲染出来就立即入队，不等视口。
+  // 入口：接管 root 下所有未入队的翻译占位；有 IntersectionObserver 时
+  // 只观察、进视口才入队（滚动到才入队）；无 IO 时立即入队（旧行为，
+  // Node 测试走这里）。data-trid 在入队时才摘掉，观察期间留着供去重。
   function observeTranslations(rootEl) {
     var scope = rootEl || (typeof document !== 'undefined' ? document : null);
     if (!scope || !scope.querySelectorAll) return;
+    sweepViewportObserved();
+    var io = getViewportObserver();
     var boxes = scope.querySelectorAll('[data-trid]');
     boxes.forEach(function (box) {
       var id = box.getAttribute('data-trid');
-      if (!id || !texts[id] || queuedIds[id]) return;
-      box.removeAttribute('data-trid');
-      enqueue(box, id, false);
+      if (!id || !texts[id] || queuedIds[id] || viewportObserved[id]) return;
+      if (!io) {
+        box.removeAttribute('data-trid');
+        enqueue(box, id, false);
+        return;
+      }
+      viewportObserved[id] = box;
+      io.observe(box);
     });
   }
 
@@ -1111,12 +1163,16 @@
     _handleClick: handleClick,
     _cacheSize: function () { return cache.size; },
     _cacheMax: function () { return TRANSLATE_CACHE_MAX; },
+    _pendingViewport: function () { return Object.keys(viewportObserved).length; },
     _isRateLimitError: isRateLimitError,
     _setRetryDelayMs: function (ms) { if (typeof ms === 'number' && ms > 0) RETRY_DELAY_MS = ms; },
     _resetForTest: function () {
       cache.clear(); texts = {}; retries = {}; queue = []; queuedIds = {};
       seq = 0; inFlight = 0; batchFn = null;
       if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+      if (viewportObserver && viewportObserver.disconnect) viewportObserver.disconnect();
+      viewportObserver = null;
+      viewportObserved = {};
     },
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

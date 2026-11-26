@@ -353,7 +353,7 @@ function registerIpc() {
   apiHandle('api:search', (_e, { q, limit }) => client.search(sessionToken(), q, limit || 20));
   apiHandle('api:follow', (_e, { name }) => client.getFollow(sessionToken(), name));
   apiHandle('api:toggle-follow', (_e, { name }) => client.toggleFollow(sessionToken(), name));
-  apiHandle('api:following-feed', (_e, { limit, before_id }) => client.getFollowingFeed(sessionToken(), { limit, before_id }));
+  apiHandle('api:following-feed', (_e, { limit, before_id, since }) => client.getFollowingFeed(sessionToken(), { limit, before_id, since }));
   apiHandle('api:update-me', (_e, { patch }) => client.updateMe(sessionToken(), patch));
   // ---- 工作区绑定（融合 P0）：登记 + 只读在线状态 ----
   // api:workspace-challenge：取一次性挑战（5 分钟过期）。
