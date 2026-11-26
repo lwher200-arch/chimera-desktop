@@ -217,7 +217,7 @@ function mergeNewerFeed(existing, newer) {
 function feedCursorOf(pagePosts) {
   const list = pagePosts || [];
   if (!list.length) return null;
-  return list[list.length - 1].id || null;
+  return list[0].id || null;
 }
 // feedNewestTsOf：增量水位 = 原始回包流帖里最新一条的 ts（过滤前取）。
 function feedNewestTsOf(pagePosts) {

@@ -4127,10 +4127,10 @@ async function main() {
     assert.deepStrictEqual(
       mergeNewerFeed([p('a', 't', true), p('b', 't')], [p('d', 't'), p('b', 't')]).map((x) => x.id),
       ['a', 'b', 'd'], '新帖应追加到末尾并去重');
-    assert.strictEqual(feedCursorOf([p('a', 't'), p('b', 't'), p('c', 't')]), 'c', '游标应是最老一条（末尾）');
+    assert.strictEqual(feedCursorOf([p('a', 't'), p('b', 't'), p('c', 't')]), 'a', '游标应是最老一条（首位，正序列表的第一条）');
     assert.strictEqual(feedCursorOf([]), null, '空页游标为 null');
     assert.strictEqual(feedNewestTsOf([p('a', '2026-11-26T01:00'), p('b', '2026-11-26T03:00'), p('c', '2026-11-26T02:00')]), '2026-11-26T03:00', '水位应取最大 ts');
-    ok('帖子合并纯函数：更早插置顶后/新帖追加末尾/去重/游标取末尾/水位取最大');
+    ok('帖子合并纯函数：更早插置顶后/新帖追加末尾/去重/游标取首位/水位取最大');
   }
   // 19b. ForumClient：getPosts 透传 before_id；getFollowingFeed 透传 since/before_id。
   {
@@ -4421,7 +4421,7 @@ async function main() {
       let fetchCount = 0;
       const fakeFetch = async (opts) => {
         fetchCount += 1;
-        assert.strictEqual(opts.before_id, fetchCount === 1 ? 'c0' : 'o2', `第 ${fetchCount} 次应以正确游标拉`);
+        assert.strictEqual(opts.before_id, fetchCount === 1 ? 'c0' : 'o1', `第 ${fetchCount} 次应以正确游标拉`);
         assert.strictEqual(opts.limit, 30, '每页应拉 30 条');
         return pages[fetchCount - 1];
       };
@@ -4432,7 +4432,7 @@ async function main() {
         (posts, beforeId) => { inserted = posts; anchor = beforeId; })();
       assert.strictEqual(fetchCount, 2, '整页被滤掉时应自动续拉');
       assert.deepStrictEqual(inserted.map((x) => x.id), ['o3', 'o4'], '只应插入可见卡');
-      assert.strictEqual(st.feedCursor, 'o4', '游标应走到最后一页最老一条');
+      assert.strictEqual(st.feedCursor, 'o3', '游标应走到最后一页最老一条');
       assert.strictEqual(st.feedHasMore, true, 'has_more 应跟最后一页');
       assert.deepStrictEqual(st.feedPosts.map((x) => x.id), ['o3', 'o4', 'n1'], '更早页应插到现有流之前');
       assert.strictEqual(anchor, 'n1', 'DOM 插入锚点应是第一张现有流卡');
@@ -4451,6 +4451,34 @@ async function main() {
       assert.strictEqual(inserted, null, '全被滤掉时不应插卡');
       assert.strictEqual(st.feedHasMore, true, 'has_more 仍真时按钮应保留');
       ok('loadOlderPosts：5 页上限，不无限拉');
+    }
+    // 回归（v0.3.14 走查真 bug）：游标取错最新一条时，再拉一页 30 条里 29 条
+    // 与已显示重叠、只剩 1 张新卡。游标=最老一条时，再拉一页应得 30 张全新卡。
+    {
+      const shown = Array.from({ length: 30 }, (_, i) => p19('n' + String(i + 1).padStart(2, '0'), 't', 'general'));
+      const fresh = Array.from({ length: 30 }, (_, i) => p19('o' + String(i + 1).padStart(2, '0'), 't', 'general'));
+      let fetchCount = 0;
+      let seenBeforeId = null;
+      const fakeFetch = async (opts) => {
+        fetchCount += 1;
+        seenBeforeId = opts.before_id;
+        assert.strictEqual(opts.limit, 30, '每页应拉 30 条');
+        return { posts: fresh, has_more: true };
+      };
+      const st = { feedLoadingOlder: false, feedHasMore: true, feedCursor: 'n01', postsBoard: 'general', feedPosts: shown.slice() };
+      let inserted = null;
+      let anchor = null;
+      await loadOlderPosts(st, fakeFetch,
+        (posts, beforeId) => { inserted = posts; anchor = beforeId; })();
+      assert.strictEqual(fetchCount, 1, '一页可见卡只需拉一次');
+      assert.strictEqual(seenBeforeId, 'n01', '应以已显示最老一条当游标');
+      assert.deepStrictEqual(inserted.map((x) => x.id), fresh.map((x) => x.id), '应插入整页 30 张新卡');
+      const shownIds = new Set(shown.map((x) => x.id));
+      assert.strictEqual(inserted.filter((x) => shownIds.has(x.id)).length, 0, '新一页与已显示零重叠');
+      assert.strictEqual(st.feedPosts.length, 60, '合并后应有 60 张卡');
+      assert.strictEqual(st.feedCursor, 'o01', '游标应走到新页最老一条');
+      assert.strictEqual(anchor, 'n01', 'DOM 插入锚点应是第一张现有流卡');
+      ok('loadOlderPosts 回归：游标=最老时再拉一页得 30 张全新卡、零重叠');
     }
   }
 
