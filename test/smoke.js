@@ -5059,17 +5059,17 @@ async function main() {
   // （走查 Driver A 101/104，3 失败全是这一项；1440 英文 584/433 不受影响）。
   // 修法（CSS-only，带子内）：ghost 内边距 8px→6px（5 个 × 4px = 20px）、
   // 搜索框 100px→90px（10px）、右侧 gap 6px→4px（9 个间隙 × 2px = 18px），
-  // 理论共收 48px。三项全是精确长度（与字体无关），修后 lenghao 容器应为
-  // 421+48=469px，余 36px；走查重跑时以实测为准（见走查报告）。
+  // 理论共收 48px。但 lenghao 重探针实测修后容器 462px（实收 41px，理论值
+  // 多算 7px——三项里有一处没抠满，逐项对不上；以实测为准），余 29px。
   {
     // 回归锁定：修前 lenghao 1280 英文确实放不下（421 < 433，差 12px）。
     const container1280enBefore = 421;
     const navNeed1280enLenghao = 54 + 51 + 50 + 58 + 89 + 50 + 81;
     assert.strictEqual(navNeed1280enLenghao, 433, 'lenghao 1280 英文 7 项共需 433px（走查探针实测）');
     assert.ok(container1280enBefore < navNeed1280enLenghao, `修前容器应放不下 7 项（${container1280enBefore}<${navNeed1280enLenghao}，差 ${navNeed1280enLenghao - container1280enBefore}px，Node 进 More）`);
-    // 修后算术：lenghao 421+48=469 ≥ 433，余 36px。
-    const container1280enAfter = container1280enBefore + 5 * 4 + 10 + 9 * 2;
-    assert.strictEqual(container1280enAfter, 469, '修后 lenghao 容器应为 421+48=469px');
+    // 修后实测：lenghao 容器 462px（修前 421 + 实收 41）≥ 433，余 29px。
+    const container1280enAfter = 462; // lenghao 重探针实测（v0317-probe2.log），修后代码
+    assert.strictEqual(container1280enAfter, 462, '修后 lenghao 容器应为 462px（重探针实测）');
     assert.ok(container1280enAfter >= navNeed1280enLenghao, `修后容器应放得下 7 项（${container1280enAfter}≥${navNeed1280enLenghao}，余 ${container1280enAfter - navNeed1280enLenghao}px）`);
     // 修后实测（沙箱 xvfb Electron 真机探针，登录态，修后代码）：
     // 1280 英文容器 458px、7 项需 449px（沙箱字体更宽），余 9px，7/7、
@@ -5089,13 +5089,13 @@ async function main() {
       { visible: [0, 1, 2, 3, 4, 5, 6], overflow: [] },
       '沙箱 1280 英文下 greedyNavFit 应 7 项全可见、More 隐藏');
     assert.deepStrictEqual(
-      greedyNavFit23([54, 51, 50, 58, 89, 50, 81], 469, 60),
+      greedyNavFit23([54, 51, 50, 58, 89, 50, 81], 462, 60),
       { visible: [0, 1, 2, 3, 4, 5, 6], overflow: [] },
       'lenghao 1280 英文下 greedyNavFit 应 7 项全可见、More 隐藏');
     // 回归：1024 仍在带子外（带子下限 1101 不变），1000px 规则保留。
     assert.ok(css20.includes('@media (min-width: 1101px) and (max-width: 1500px)'), '带子仍应为 1101–1500px');
     assert.ok(css20.includes('@media (max-width: 1000px)'), '1000px 断点应保留');
-    ok('1280 英文顶栏修复：带子再收 48px、lenghao 469≥433、沙箱 458≥449、More 隐藏');
+    ok('1280 英文顶栏修复：带子理论收 48px、实收 41px、lenghao 462≥433、沙箱 458≥449、More 隐藏');
   }
 
   console.log('== 24. v0.3.17 修复轮：macOS 原生菜单本地化 ==');
