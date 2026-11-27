@@ -546,16 +546,20 @@ select {
 .profile-stats { margin: 8px 0; }
 .tag-chip { font-size: 12px; border-radius: 999px; padding: 1px 9px; background: var(--surface-2); border: 1px solid var(--border-strong); color: var(--muted); }
 .modal-card .comm-form label { display: flex; flex-direction: column; gap: 4px; }
-/* 窄屏顶栏（v0.3.1 走查，v0.3.8 上提到 1400px，v0.3.16 提到 1500px）：
-   1500px 以下藏品牌副标题、收紧导航间距、收窄搜索框，让 7 个导航在 1280px
+/* 窄屏顶栏（v0.3.1 走查，v0.3.8 上提到 1400px，v0.3.16 提到 1500px，
+   v0.3.18 提到 1900px）：
+   1900px 以下藏品牌副标题、收紧导航间距、收窄搜索框，让 7 个导航在 1280px
    下中英文都放得下；v0.3.16 把上限从 1400 提至 1500：1440 英文下品牌副标
    题（沙箱探针 260px、lenghao 约 347px）把导航容器压到只剩约 145–176px、
    7 项共需 533px（6px 内边距时 449px），只有首页可见，藏副标题是最大一笔
    收回；v0.3.13：导航内边距 8px→6px——英文 1280 下 7 项共需 462px、容器只剩
    453px（右侧语言/退出按钮变宽 + 节点按钮带状态徽章最宽），8px 时节点
    被收进 More，6px 后余 19px 空隙；1000px 以下状态 pill 只留圆点，
-   不让导航与右侧按钮叠在一起。 */
-@media (max-width: 1500px) {
+   不让导航与右侧按钮叠在一起。v0.3.18：1501–1827px 英文仍溢出（1500 以上
+   副标题回来、带子脱出；沙箱登录态探针：1501 容器 184/需 533、1827 容器
+   510/需 533，差 23px；不收紧时容器 = 宽 − 1317，1850 起才自然放得下），
+   上限延至 1900px，悬崖落在自然放得下的位置（1901 容器 584/需 533）。 */
+@media (max-width: 1900px) {
   .brand .sub { display: none; }
   .nav-btn { padding: 7px 6px; }
   #topbar { gap: 8px; }
@@ -578,11 +582,18 @@ select {
    搜索框 100px→90px（10px）、右侧 gap 6px→4px（9 个间隙 × 2px = 18px）。
    修后实测：lenghao 1280 英文容器 462px（修前 421px、7 项需 433px，余 29px，见 §23）；
    沙箱（字体更宽）容器 458px、7 项需 449px，余 9px（沙箱 xvfb 探针
-   实测，见 §23）。1440 英文容器同步变宽。1024 仍在带子外，不动。 */
-@media (min-width: 1101px) and (max-width: 1500px) {
+   实测，见 §23）。1440 英文容器同步变宽。1024 仍在带子外，不动。
+   v0.3.18：上限 1500→1900px（见上条注释，1501–1827 缺口）；另补一条
+   ID 级覆盖——#themeToggle/#langToggle 自 v0.3.1/v0.3.4 起就有
+   padding: 7px 10px 的 ID 规则，特异度压过带子的 .btn.ghost 类规则，
+   所以 v0.3.17 的 ghost 收紧只对铃铛/设置/退出三钮生效（实收 12px 不是
+   20px），正是 §23 理论 48px、实收 41px 差的那 7px。本轮在带子内用同
+   级 ID 规则把它俩也收到 6px，补回 16px（1280 沙箱容器 441→457px，修后探针实测）。 */
+@media (min-width: 1101px) and (max-width: 1900px) {
   #topbar { gap: 6px; }
   .top-right { gap: 4px; }
   .top-right .btn.ghost { padding: 7px 6px; }
+  #themeToggle, #langToggle { padding: 7px 6px; }
   #globalSearchInput { width: 90px; }
 }
 @media (max-width: 1000px) {

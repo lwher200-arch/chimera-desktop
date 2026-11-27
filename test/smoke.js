@@ -2916,7 +2916,9 @@ async function main() {
     assert.strictEqual(comms.ok, true, 'GET /api/communities 应回 ok');
     const eterna = (comms.communities || []).find((c) => c.name === 'eternatide');
     assert.ok(eterna, '社区列表应有 eternatide');
-    assert.strictEqual(eterna.memberCount, 5, 'eternatide 成员应为 5 人');
+    // v0.3.18：live 值 5→6（社区 2026-11-27 后新增 1 名成员；只读 live 断言，
+    // 人数再变时按 live 值同步，不判产品错）。
+    assert.strictEqual(eterna.memberCount, 6, 'eternatide 成员应为 6 人');
     ok(`live GET /api/communities：eternatide 成员 ${eterna.memberCount} 人、下挂 ${eterna.groupCount} 群`);
     // 账本未登录应 401（成员 only 的边界）。
     await assert.rejects(
@@ -3027,19 +3029,19 @@ async function main() {
   }
 
   console.log('== 13. 顶栏溢出修复 + 全内容跟随语言（v0.3.8）==');
-  // 13a. 顶栏 CSS：1500px 断点收紧（v0.3.16 由 1400 提至 1500，覆盖 1440）、导航可横向滚动兜底、1000px 规则保留。
+  // 13a. 顶栏 CSS：1900px 断点收紧（v0.3.16 由 1400 提至 1500，v0.3.18 提至 1900，覆盖 1501–1827）、导航可横向滚动兜底、1000px 规则保留。
   {
     const css = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'styles.css'), 'utf8');
-    const m1400 = css.match(/@media \(max-width: 1500px\) \{([\s\S]*?)\n\}/);
-    assert.ok(m1400, '应有 1500px 断点');
-    assert.ok(m1400[1].includes('.brand .sub { display: none; }'), '1500px 以下应藏品牌副标题');
-    assert.ok(m1400[1].includes('#globalSearchInput { width: 140px; }'), '1500px 以下搜索框应收窄到 140px');
-    assert.ok(m1400[1].includes('.nav-btn { padding: 7px 6px; }'), '1500px 以下导航按钮应收紧内边距（v0.3.13：8px 时英文 1280 下节点被收进 More，6px 才放得下 7 项）');
+    const m1400 = css.match(/@media \(max-width: 1900px\) \{([\s\S]*?)\n\}/);
+    assert.ok(m1400, '应有 1900px 断点');
+    assert.ok(m1400[1].includes('.brand .sub { display: none; }'), '1900px 以下应藏品牌副标题');
+    assert.ok(m1400[1].includes('#globalSearchInput { width: 140px; }'), '1900px 以下搜索框应收窄到 140px');
+    assert.ok(m1400[1].includes('.nav-btn { padding: 7px 6px; }'), '1900px 以下导航按钮应收紧内边距（v0.3.13：8px 时英文 1280 下节点被收进 More，6px 才放得下 7 项）');
     assert.ok(/\.topnav-links \{[^}]*overflow-x: auto/.test(css), '导航容器应可横向滚动兜底');
     assert.ok(css.includes('.topnav-links::-webkit-scrollbar { display: none; }'), '导航滚动条应隐藏');
     assert.ok(css.includes('@media (max-width: 1000px)'), '1000px 断点应保留');
     assert.ok(css.includes('#sseText { display: none; }'), '1000px 以下状态文字仍应隐藏');
-    ok('顶栏 CSS：1500px 断点收紧 + 导航横向滚动兜底 + 1000px 规则保留');
+    ok('顶栏 CSS：1900px 断点收紧 + 导航横向滚动兜底 + 1000px 规则保留');
   }
   // 13b–13e 共用：假 localStorage（Node 下没有），用完删掉。
   globalThis.localStorage = {
@@ -4644,24 +4646,29 @@ async function main() {
       tr._resetForTest();
     }
   }
-  // 20k. 顶栏收紧带子（v0.3.15 修复轮，v0.3.16 上提到 1500px）：1280 英文下铃铛/齿轮各占 46px，
-  // 导航容器只剩 345px、7 项共需 433px，差 88px。1101–1500px 带子收回约
+  // 20k. 顶栏收紧带子（v0.3.15 修复轮，v0.3.16 上提到 1500px，v0.3.18 上提到 1900px）：1280 英文下铃铛/齿轮各占 46px，
+  // 导航容器只剩 345px、7 项共需 433px，差 88px。1101–1900px 带子收回约
   // 120px（右侧 ghost 按钮 5×12 + 搜索框 40 + 两侧 gap 20），容器回到约
   // 465px。带子从 1101px 起，1024px 的规则原样不动。
   // v0.3.17 修复轮带子又收紧一次（ghost 6px、搜索 90px、右侧 gap 4px，
   // 见 §23），以下规则断言按当前 CSS；算术仍是 v0.3.15 那轮的快照。
+  // v0.3.18 补一条 ID 级覆盖：#themeToggle/#langToggle 自 v0.3.1/v0.3.4 起就有
+  // padding: 7px 10px 的 ID 规则，特异度压过带子的 .btn.ghost 类规则，所以
+  // v0.3.17 的 ghost 收紧只对铃铛/设置/退出三钮生效（实收 12px 不是 20px，
+  // 正是 §23 理论 48px、实收 41px 差的那 7px）；带子内须有同级 ID 规则把它俩也收到 6px。
   {
-    const bandAt = css20.indexOf('@media (min-width: 1101px) and (max-width: 1500px)');
-    assert.ok(bandAt >= 0, '应有 1101–1500px 顶栏收紧带子');
+    const bandAt = css20.indexOf('@media (min-width: 1101px) and (max-width: 1900px)');
+    assert.ok(bandAt >= 0, '应有 1101–1900px 顶栏收紧带子');
     const bandEnd = css20.indexOf('}', css20.indexOf('#globalSearchInput { width: 90px; }', bandAt)) + 1;
     const band = css20.slice(bandAt, bandEnd);
     assert.ok(band.includes('.top-right .btn.ghost { padding: 7px 6px; }'), '带子内右侧 ghost 按钮应收紧到 6px 内边距');
+    assert.ok(band.includes('#themeToggle, #langToggle { padding: 7px 6px; }'), '带子内主题/语言按钮应有 ID 级覆盖收到 6px 内边距（ID 规则压过类规则，见注释）');
     assert.ok(band.includes('#globalSearchInput { width: 90px; }'), '带子内搜索框应收到 90px');
     assert.ok(band.includes('#topbar { gap: 6px; }'), '带子内顶栏 gap 应收到 6px');
     assert.ok(band.includes('.top-right { gap: 4px; }'), '带子内右侧 gap 应收到 4px');
-    const base1400 = css20.slice(css20.indexOf('@media (max-width: 1500px)'), bandAt);
-    assert.ok(base1400.includes('#globalSearchInput { width: 140px; }'), '1500 断点仍应是搜索框 140px（1024 不动）');
-    assert.ok(base1400.includes('#topbar { gap: 8px; }'), '1500 断点仍应是顶栏 gap 8px（1024 不动）');
+    const base1400 = css20.slice(css20.indexOf('@media (max-width: 1900px)'), bandAt);
+    assert.ok(base1400.includes('#globalSearchInput { width: 140px; }'), '1900 断点仍应是搜索框 140px（1024 不动）');
+    assert.ok(base1400.includes('#topbar { gap: 8px; }'), '1900 断点仍应是顶栏 gap 8px（1024 不动）');
     // 算术（探针 2026-11-27 真机实测）：7 项宽 54+51+50+58+89+50+81=433；
     // 收回 = ghost 5×12 + 搜索 40 + gap 20 = 120；345+120=465 ≥ 433。
     const navNeed1280en = 54 + 51 + 50 + 58 + 89 + 50 + 81;
@@ -4948,20 +4955,22 @@ async function main() {
   }
 
   console.log('== 21. v0.3.16：1440px 英文顶栏溢出修复 ==');
-  // 21a. 1440 英文顶栏（v0.3.16）：副标题藏到 1500px、收紧带子上提到 1500px；
+  // 21a. 1440 英文顶栏（v0.3.16）：副标题藏到 1900px、收紧带子上提到 1900px；
   // 修前沙箱探针：容器 145px、7 项需 533px（12px 内边距）、副标题 260px 可见，
   // 只有首页可见；修后容器 586px、7 项需 449px（6px 内边距），余 137px。
   // 1280/1024 的规则与沙箱实测数与修前完全一致（回归）。
   // v0.3.17 修复轮带子又收紧一次（ghost 6px、搜索 90px、右侧 gap 4px，
-  // 见 §23），沙箱 1440 英文容器 586→618px，以下按当前数断言。
+  // 见 §23），沙箱 1440 英文容器 586→618px。
+  // v0.3.18 带子上提至 1900px + 主题/语言按钮 ID 级覆盖收到 6px（见 §20k/§25），
+  // 沙箱 1440 英文容器 601→617px（修前复测 601，§21 旧值 618 高出 17px，见 §23 注释），以下按当前数断言。
   {
-    const m1500 = css20.match(/@media \(max-width: 1500px\) \{([\s\S]*?)\n\}/);
-    assert.ok(m1500, '应有 1500px 断点（副标题藏到 1500px，覆盖 1440）');
-    assert.ok(m1500[1].includes('.brand .sub { display: none; }'), '1500px 以下应藏品牌副标题');
-    assert.ok(m1500[1].includes('.nav-btn { padding: 7px 6px; }'), '1500px 以下导航按钮应为 6px 内边距');
-    assert.ok(m1500[1].includes('#globalSearchInput { width: 140px; }'), '1500px 以下搜索框应为 140px');
-    const bandAt21 = css20.indexOf('@media (min-width: 1101px) and (max-width: 1500px)');
-    assert.ok(bandAt21 >= 0, '收紧带子应为 1101–1500px（覆盖 1440，1024 不进带子）');
+    const m1500 = css20.match(/@media \(max-width: 1900px\) \{([\s\S]*?)\n\}/);
+    assert.ok(m1500, '应有 1900px 断点（副标题藏到 1900px，覆盖 1440）');
+    assert.ok(m1500[1].includes('.brand .sub { display: none; }'), '1900px 以下应藏品牌副标题');
+    assert.ok(m1500[1].includes('.nav-btn { padding: 7px 6px; }'), '1900px 以下导航按钮应为 6px 内边距');
+    assert.ok(m1500[1].includes('#globalSearchInput { width: 140px; }'), '1900px 以下搜索框应为 140px');
+    const bandAt21 = css20.indexOf('@media (min-width: 1101px) and (max-width: 1900px)');
+    assert.ok(bandAt21 >= 0, '收紧带子应为 1101–1900px（覆盖 1440，1024 不进带子）');
     const bandEnd21 = css20.indexOf('}', css20.indexOf('#globalSearchInput { width: 90px; }', bandAt21)) + 1;
     const band21 = css20.slice(bandAt21, bandEnd21);
     assert.ok(band21.includes('.top-right .btn.ghost { padding: 7px 6px; }'), '带子内右侧 ghost 按钮应收紧到 6px 内边距');
@@ -4977,23 +4986,25 @@ async function main() {
     // 容器 145+441=586，7 项 53+49+47+56+89+48+79=421，+7×4 gap=449，余 137px。
     // v0.3.17 再收紧：ghost 8→6（-20）、搜索 100→90（-10）、右侧 gap 6→4
     // （-18），容器 586→618px，余 169px（沙箱探针实测，见 §23）。
+    // v0.3.18 再收紧：主题/语言按钮 ID 覆盖 10→6（-16），容器 601→617px，
+    // 余 168px（沙箱探针实测，见 §25；§21 旧值 618 高出 17px，见 §23 注释）。
     const navNeed1440en = 53 + 49 + 47 + 56 + 89 + 48 + 79 + 7 * 4;
-    const container1440en = 618;
+    const container1440en = 617;
     assert.strictEqual(navNeed1440en, 449, '1440 英文 7 项共需 449px（6px 内边距，探针实测）');
     assert.ok(container1440en >= navNeed1440en, `修后 1440 英文容器应放得下 7 项（${container1440en}≥${navNeed1440en}，余 ${container1440en - navNeed1440en}px）`);
     // greedyNavFit 在 1440 英文输入下不应溢出（More 隐藏）。
     const greedyNavFit21 = new Function(`${extractFn20('greedyNavFit')}; return greedyNavFit;`)();
     assert.deepStrictEqual(
-      greedyNavFit21([57, 53, 51, 60, 93, 52, 83], 618, 70),
+      greedyNavFit21([57, 53, 51, 60, 93, 52, 83], 617, 70),
       { visible: [0, 1, 2, 3, 4, 5, 6], overflow: [] },
       '1440 英文下 greedyNavFit 应 7 项全可见、More 隐藏');
     // 回归：1280 仍在带子内（验收线不受影响）、1024 仍在带子外、
     // 1000px 规则保留；1280/1024 的沙箱实测容器与修前一致（426/74 英文）。
-    assert.ok(1101 <= 1280 && 1280 <= 1500, '带子应仍覆盖 1280（1280 验收线不受影响）');
+    assert.ok(1101 <= 1280 && 1280 <= 1900, '带子应仍覆盖 1280（1280 验收线不受影响）');
     assert.ok(1024 < 1101, '带子下限 1101 应把 1024 排除在外（1024 More 行为不动）');
     assert.ok(css20.includes('@media (max-width: 1000px)'), '1000px 断点应保留');
     assert.ok(css20.includes('#sseText { display: none; }'), '1000px 以下状态文字仍应隐藏');
-    ok('1440 英文顶栏：副标题藏到 1500px、带子上提、容器 618≥449、More 隐藏、1280/1024 规则未变');
+    ok('1440 英文顶栏：副标题藏到 1900px、带子上提、容器 617≥449、More 隐藏、1280/1024 规则未变');
   }
 
   console.log('== 22. v0.3.17：品牌名跟随语言（奇美拉 / Chimera）==');
@@ -5039,7 +5050,7 @@ async function main() {
     assert.ok(html22.includes('<h1 data-i18n="brand.name">'), '首页大标题应走 data-i18n="brand.name"');
     assert.strictEqual((html22.match(/data-i18n-alt="brand\.name"/g) || []).length, 3, '三个品牌 logo img（顶栏/登录页/空会话）都应有 data-i18n-alt="brand.name"');
     assert.ok(html22.includes('<h1 data-i18n="login.title">'), '登录标题应仍走 data-i18n="login.title"');
-    assert.ok(html22.includes('v0.3.17'), '页脚版本应为 v0.3.17');
+    assert.ok(html22.includes('v0.3.18'), '页脚版本应为 v0.3.18');
     ok('index.html：顶栏品牌名 + 首页大标题 + 3 处 logo alt 全走 brand.name');
   }
   // 22d. renderer.js 动态空会话：alt 走 ui('brand.name')，随渲染时语言；
@@ -5049,8 +5060,8 @@ async function main() {
     assert.ok(rendererSrc22.includes(`alt="' + ui('brand.name') + '"`), '动态空会话 logo alt 应走 ui(\'brand.name\')');
     assert.ok(!rendererSrc22.includes('alt="奇美拉"'), 'renderer.js 不应再有写死的中文品牌 alt');
     const pkg22 = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
-    assert.strictEqual(pkg22.version, '0.3.17', 'package.json 版本应为 0.3.17');
-    ok('renderer.js 动态 alt + package.json 0.3.17；数据内容未动');
+    assert.strictEqual(pkg22.version, '0.3.18', 'package.json 版本应为 0.3.18');
+    ok('renderer.js 动态 alt + package.json 0.3.18；数据内容未动');
   }
 
   console.log('== 23. v0.3.17 修复轮：1280px 英文顶栏溢出（品牌名变宽顶掉 Node）==');
@@ -5061,6 +5072,14 @@ async function main() {
   // 搜索框 100px→90px（10px）、右侧 gap 6px→4px（9 个间隙 × 2px = 18px），
   // 理论共收 48px。但 lenghao 重探针实测修后容器 462px（实收 41px，理论值
   // 多算 7px——三项里有一处没抠满，逐项对不上；以实测为准），余 29px。
+  // v0.3.18 补记：7px 差额已定位——#themeToggle/#langToggle 自 v0.3.1/v0.3.4 起
+  // 有 padding: 7px 10px 的 ID 规则，特异度压过带子的 .btn.ghost 类规则，v0.3.17
+  // 的 ghost 收紧只对铃铛/设置/退出三钮生效（实收 12px 不是 20px）；本轮在带子内
+  // 补同级 ID 覆盖收到 6px，补回 16px。另：v0.3.18 重探针测得同款修前代码沙箱
+  // 1280 英文容器为 441px（§23 旧值 458 高出 17px，应是当时探针的右侧状态差；
+  // 以本次重探针为准），补回 16px 后为 457px，与旧值差 1px，取实测 457；中文
+  // 1280 修后为 544px（旧值 562 高出 18px，同上），修前中文未单独重测，544-16
+  // 推得修前约 528px，不作断言依据。
   {
     // 回归锁定：修前 lenghao 1280 英文确实放不下（421 < 433，差 12px）。
     const container1280enBefore = 421;
@@ -5072,20 +5091,20 @@ async function main() {
     assert.strictEqual(container1280enAfter, 462, '修后 lenghao 容器应为 462px（重探针实测）');
     assert.ok(container1280enAfter >= navNeed1280enLenghao, `修后容器应放得下 7 项（${container1280enAfter}≥${navNeed1280enLenghao}，余 ${container1280enAfter - navNeed1280enLenghao}px）`);
     // 修后实测（沙箱 xvfb Electron 真机探针，登录态，修后代码）：
-    // 1280 英文容器 458px、7 项需 449px（沙箱字体更宽），余 9px，7/7、
-    // More 隐藏；1280 中文 562px、需 334px，余 228px。
-    const container1280enSandbox = 458;
+    // 1280 英文容器 457px、7 项需 449px（沙箱字体更宽），余 8px，7/7、
+    // More 隐藏；1280 中文 544px、需 334px，余 210px（v0.3.18 重探针实测，见节首注释）。
+    const container1280enSandbox = 457;
     const navNeed1280enSandbox = 57 + 53 + 51 + 60 + 93 + 52 + 83;
     assert.strictEqual(navNeed1280enSandbox, 449, '沙箱 1280 英文 7 项共需 449px（探针实测）');
     assert.ok(container1280enSandbox >= navNeed1280enSandbox, `沙箱修后容器应放得下 7 项（${container1280enSandbox}≥${navNeed1280enSandbox}，余 ${container1280enSandbox - navNeed1280enSandbox}px）`);
-    const container1280zhSandbox = 562;
+    const container1280zhSandbox = 544;
     const navNeed1280zhSandbox = 44 + 44 + 44 + 44 + 44 + 44 + 70;
     assert.strictEqual(navNeed1280zhSandbox, 334, '沙箱 1280 中文 7 项共需 334px（探针实测）');
     assert.ok(container1280zhSandbox >= navNeed1280zhSandbox, '沙箱 1280 中文容器应放得下 7 项');
     // greedyNavFit：修后两套宽度在各自容器下都不应溢出（More 隐藏）。
     const greedyNavFit23 = new Function(`${extractFn20('greedyNavFit')}; return greedyNavFit;`)();
     assert.deepStrictEqual(
-      greedyNavFit23([57, 53, 51, 60, 93, 52, 83], 458, 61),
+      greedyNavFit23([57, 53, 51, 60, 93, 52, 83], 457, 61),
       { visible: [0, 1, 2, 3, 4, 5, 6], overflow: [] },
       '沙箱 1280 英文下 greedyNavFit 应 7 项全可见、More 隐藏');
     assert.deepStrictEqual(
@@ -5093,9 +5112,9 @@ async function main() {
       { visible: [0, 1, 2, 3, 4, 5, 6], overflow: [] },
       'lenghao 1280 英文下 greedyNavFit 应 7 项全可见、More 隐藏');
     // 回归：1024 仍在带子外（带子下限 1101 不变），1000px 规则保留。
-    assert.ok(css20.includes('@media (min-width: 1101px) and (max-width: 1500px)'), '带子仍应为 1101–1500px');
+    assert.ok(css20.includes('@media (min-width: 1101px) and (max-width: 1900px)'), '带子仍应为 1101–1900px');
     assert.ok(css20.includes('@media (max-width: 1000px)'), '1000px 断点应保留');
-    ok('1280 英文顶栏修复：带子理论收 48px、实收 41px、lenghao 462≥433、沙箱 458≥449、More 隐藏');
+    ok('1280 英文顶栏修复：带子理论收 48px、实收 41px、lenghao 462≥433、沙箱 457≥449、More 隐藏');
   }
 
   console.log('== 24. v0.3.17 修复轮：macOS 原生菜单本地化 ==');
@@ -5190,6 +5209,89 @@ async function main() {
     assert.ok(rendererSrc24.includes('window.chimera.app.setLang(next)'), '语言切换时渲染进程应通知主进程重建菜单');
     assert.ok(rendererSrc24.includes('window.chimera.app.setLang(state.lang)'), '启动时渲染进程应按存的语言通知主进程一次');
     ok('平台口径：非 darwin 不建菜单；main/preload/renderer 接线齐全');
+  }
+
+  console.log('== 25. v0.3.18：1501–1827px 英文顶栏溢出修复（v0.3.16 遗留缺口）==');
+  // 背景：v0.3.16 把副标题隐藏与收紧带子上提到 1500px，只覆盖到 1440；
+  // 1501 以上副标题回来、带子脱出，英文导航又放不下，要到 1920 才够宽。
+  // 修前实测（沙箱 xvfb Electron 真机探针，登录态模拟，英文，修前代码）：
+  // 1501 容器 184/需 533（差 349，菜单里 6 项）、1600 容器 283/需 533
+  // （差 250）、1700 容器 383/需 533（差 150）、1827 容器 510/需 533
+  // （差 23，菜单里 team/node）、1920 容器 603/需 533（余 70，7/7）。
+  // 不收紧时容器 = 宽 − 1317，1850 起才自然放得下。
+  // 修法（CSS-only）：副标题隐藏与收紧带子上限 1500→1900px（悬崖落在自然
+  // 放得下的位置，1901 容器 584/需 533，余 51px）；带子内补主题/语言按钮
+  // 的 ID 级覆盖收到 6px（见 §20k），1280 沙箱容器 441→457px。
+  // 25a. CSS：1900px 断点 + 1101–1900px 带子 + ID 覆盖 + 1024/1000px 不动。
+  {
+    const m1900 = css20.match(/@media \(max-width: 1900px\) \{([\s\S]*?)\n\}/);
+    assert.ok(m1900, '应有 1900px 断点');
+    assert.ok(m1900[1].includes('.brand .sub { display: none; }'), '1900px 以下应藏品牌副标题');
+    const bandAt25 = css20.indexOf('@media (min-width: 1101px) and (max-width: 1900px)');
+    assert.ok(bandAt25 >= 0, '收紧带子应为 1101–1900px（覆盖 1501–1827，1024 不进带子）');
+    const bandEnd25 = css20.indexOf('}', css20.indexOf('#globalSearchInput { width: 90px; }', bandAt25)) + 1;
+    const band25 = css20.slice(bandAt25, bandEnd25);
+    assert.ok(band25.includes('#themeToggle, #langToggle { padding: 7px 6px; }'), '带子内应有主题/语言按钮 ID 级覆盖（收到 6px）');
+    assert.ok(band25.includes('.top-right .btn.ghost { padding: 7px 6px; }'), '带子内右侧 ghost 按钮应为 6px 内边距');
+    assert.ok(1101 <= 1501 && 1827 <= 1900, '带子应覆盖 1501–1827（缺口全在带子内）');
+    assert.ok(1024 < 1101, '带子下限 1101 应把 1024 排除在外（1024 More 行为不动）');
+    assert.ok(css20.includes('@media (max-width: 1000px)'), '1000px 断点应保留');
+    ok('CSS：1900px 断点 + 1101–1900px 带子 + ID 覆盖 + 1024/1000px 不动');
+  }
+  // 25b. 修后算术（沙箱 xvfb Electron 真机探针，登录态模拟，英文，修后代码）：
+  // 带子内 7 项需 449px（6px 内边距）；1501 容器 678（余 229）、1600 容器 777
+  // （余 328）、1700 容器 877（余 428）、1827 容器 1004（余 555）、1850 容器
+  // 1027（余 578）、1900 容器 1077（余 628），全部 7/7、More 隐藏；中文对照
+  // 1501 容器 765/需 334、1827 容器 1091/需 334，同样 7/7。
+  {
+    const rows25 = [
+      [1501, 678, 449], [1600, 777, 449], [1700, 877, 449],
+      [1827, 1004, 449], [1850, 1027, 449], [1900, 1077, 449],
+    ];
+    for (const [w, container, need] of rows25) {
+      assert.ok(container >= need, `${w}px 英文修后容器应放得下 7 项（${container}≥${need}，余 ${container - need}px）`);
+    }
+    const container1501zh = 765;
+    const navNeed1501zh = 44 + 44 + 44 + 44 + 44 + 44 + 70;
+    assert.strictEqual(navNeed1501zh, 334, '1501 中文 7 项共需 334px（探针实测）');
+    assert.ok(container1501zh >= navNeed1501zh, `1501 中文修后容器应放得下 7 项（${container1501zh}≥${navNeed1501zh}）`);
+    const container1827zh = 1091;
+    assert.ok(container1827zh >= navNeed1501zh, `1827 中文修后容器应放得下 7 项（${container1827zh}≥${navNeed1501zh}）`);
+    ok('修后算术：1501–1900 英文容器 678–1077≥449、中英对照 7/7');
+  }
+  // 25c. greedyNavFit：修后 1501（带子内）与 1901（带子外、自然放得下）都不应溢出；
+  // 回归锁定修前 1827 确实溢出（容器 510 < 需 533，team/node 进菜单）。
+  {
+    const greedyNavFit25 = new Function(`${extractFn20('greedyNavFit')}; return greedyNavFit;`)();
+    assert.deepStrictEqual(
+      greedyNavFit25([57, 53, 51, 60, 93, 52, 83], 678, 61),
+      { visible: [0, 1, 2, 3, 4, 5, 6], overflow: [] },
+      '修后 1501 英文下 greedyNavFit 应 7 项全可见、More 隐藏');
+    assert.deepStrictEqual(
+      greedyNavFit25([69, 65, 63, 72, 105, 64, 95], 584, 77),
+      { visible: [0, 1, 2, 3, 4, 5, 6], overflow: [] },
+      '修后 1901 英文下 greedyNavFit 应 7 项全可见、More 隐藏（带子外自然放得下）');
+    assert.deepStrictEqual(
+      greedyNavFit25([69, 65, 63, 72, 105, 64, 95], 510, 77),
+      { visible: [0, 1, 2, 3, 4], overflow: [5, 6] },
+      '修前 1827 英文下 greedyNavFit 应溢出 team/node（容器 510 < 需 533，回归锁定）');
+    assert.deepStrictEqual(
+      greedyNavFit25([57, 53, 51, 60, 93, 52, 83], 51, 61),
+      { visible: [], overflow: [0, 1, 2, 3, 4, 5, 6] },
+      '1024 英文下 greedyNavFit 应 7 项全进菜单（带子外，既定行为）');
+    ok('greedyNavFit：修后 1501/1901 全可见、修前 1827 溢出锁定、1024 全进菜单');
+  }
+  // 25d. 悬崖与回归：1901（带子外）容器 584/需 533，余 51px；1920 容器 603/需 533
+  // 与修前一致（余 70px，不退化）；1024 仍在带子外。
+  {
+    const container1901en = 584;
+    const navNeed1901en = 69 + 65 + 63 + 72 + 105 + 64 + 95;
+    assert.strictEqual(navNeed1901en, 533, '1901 英文 7 项共需 533px（12px 内边距，探针实测）');
+    assert.ok(container1901en >= navNeed1901en, `1901 英文容器应放得下 7 项（${container1901en}≥${navNeed1901en}，余 ${container1901en - navNeed1901en}px，悬崖无缺口）`);
+    const container1920en = 603;
+    assert.ok(container1920en >= navNeed1901en, `1920 英文容器应与修前一致放得下 7 项（${container1920en}≥${navNeed1901en}，余 ${container1920en - navNeed1901en}px，不退化）`);
+    assert.ok(!css20.includes('@media (min-width: 1101px) and (max-width: 1500px)'), '旧 1500px 带子不应再有');
+    ok('悬崖与回归：1901 余 51px、1920 与修前一致 603≥533、旧 1500 带子已无');
   }
 
   console.log(`\nPASS: ${passed} 项全过`);
