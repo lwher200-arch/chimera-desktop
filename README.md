@@ -8,7 +8,7 @@
 直接去 [Releases](https://github.com/lwher200-arch/chimera-desktop/releases)
 下载最新版，普通用户**不用**自己跑下面的构建命令：
 
-- **Windows**：下载 `Chimera-<版本号>-win.zip`（约 123 MB），解压后双击
+- **Windows**：下载 `Chimera-Desktop-<版本号>-win.zip`（约 119 MB），解压后双击
   里面的 `Chimera 桌面端.exe` 就能打开，不用安装。
 - **Linux**：下载 `Chimera-Desktop-<版本号>.AppImage`，给执行权限后双击运行。
 - 目前没有 NSIS 安装器（`Setup.exe`）：Windows 只有上面的免安装 zip，
@@ -100,13 +100,17 @@ Release 当附件（`npm run dist:linux` 后从 `dist/linux-unpacked/resources/a
 - **Windows 便携版（zip，普通用户就用这个，也是目前唯一随 Release
   发布的 Windows 包）**：解压即用，不用安装。
   `npm run dist:win-zip`（即 `npx electron-builder --win --x64 -c.win.target=zip`），
-  产物 `dist/Chimera-<版本号>-win.zip`（版本号取 `package.json`），
+  产物 `dist/Chimera-Desktop-<版本号>-win.zip`（版本号取 `package.json`），
   解压后运行里面的 `Chimera 桌面端.exe`。
 - **Windows 安装包（NSIS，仅开发者在 Windows 上构建，目前不随
   Release 发布）**：必须在 Windows 机器上构建。
   双击 `build-windows.bat`（或 `npm install` 后 `npm run dist:win`），
-  产物在 `dist/`，文件名形如 `Chimera 桌面端 Setup <版本号>.exe`
+  产物在 `dist/`，文件名形如 `Chimera-Desktop-<版本号>-win.exe`
   （版本号取 `package.json`）。
+- **包名口径**：Windows 与 Linux 的 `artifactName` 都已在 `package.json`
+  里显式写死为英文 `Chimera-Desktop-…`，不要再让打包工具拿中文产品名
+  `Chimera 桌面端` 去生成文件名——它会被洗成 `Chimera.`，v0.3.17 的
+  `Chimera.-0.3.17-win.zip` 就是这么来的（已在 Release 里换成正确包名重发）。
 - 注意：Linux 下交叉编译 NSIS 安装包需要 32 位 wine，本仓库的
   沙箱环境跑不了 32 位 wine，所以 NSIS 包只能在 Windows 上打；
   zip 可以在 Linux 下打。发版时 Windows 只发 zip，不要把本地

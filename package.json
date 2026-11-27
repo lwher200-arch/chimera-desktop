@@ -42,7 +42,8 @@
           ],
           "target": "nsis"
         }
-      ]
+      ],
+      "artifactName": "Chimera-Desktop-${version}-win.${ext}"
     },
     "nsis": {
       "allowToChangeInstallationDirectory": true,
