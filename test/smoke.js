@@ -23,6 +23,7 @@ const { ServerResolver, PRIMARY_BASE, FALLBACK_BASE } = require('../lib/serverRe
 const { AppUpdater, compareVersions, sha256Hex } = require('../lib/appUpdater');
 const { NodeManager, DEFAULT_L2_RPC, resolveL2Rpc } = require('../lib/nodeManager');
 const { Store } = require('../lib/store');
+const { buildAppMenuTemplate, applyAppMenu } = require('../lib/appMenu');
 
 const API_BASE = process.env.CHIMERA_API_BASE || 'https://forum.coldhao.win';
 let passed = 0;
@@ -4647,15 +4648,17 @@ async function main() {
   // 导航容器只剩 345px、7 项共需 433px，差 88px。1101–1500px 带子收回约
   // 120px（右侧 ghost 按钮 5×12 + 搜索框 40 + 两侧 gap 20），容器回到约
   // 465px。带子从 1101px 起，1024px 的规则原样不动。
+  // v0.3.17 修复轮带子又收紧一次（ghost 6px、搜索 90px、右侧 gap 4px，
+  // 见 §23），以下规则断言按当前 CSS；算术仍是 v0.3.15 那轮的快照。
   {
     const bandAt = css20.indexOf('@media (min-width: 1101px) and (max-width: 1500px)');
     assert.ok(bandAt >= 0, '应有 1101–1500px 顶栏收紧带子');
-    const bandEnd = css20.indexOf('}', css20.indexOf('#globalSearchInput { width: 100px; }', bandAt)) + 1;
+    const bandEnd = css20.indexOf('}', css20.indexOf('#globalSearchInput { width: 90px; }', bandAt)) + 1;
     const band = css20.slice(bandAt, bandEnd);
-    assert.ok(band.includes('.top-right .btn.ghost { padding: 7px 8px; }'), '带子内右侧 ghost 按钮应收紧到 8px 内边距');
-    assert.ok(band.includes('#globalSearchInput { width: 100px; }'), '带子内搜索框应收到 100px');
+    assert.ok(band.includes('.top-right .btn.ghost { padding: 7px 6px; }'), '带子内右侧 ghost 按钮应收紧到 6px 内边距');
+    assert.ok(band.includes('#globalSearchInput { width: 90px; }'), '带子内搜索框应收到 90px');
     assert.ok(band.includes('#topbar { gap: 6px; }'), '带子内顶栏 gap 应收到 6px');
-    assert.ok(band.includes('.top-right { gap: 6px; }'), '带子内右侧 gap 应收到 6px');
+    assert.ok(band.includes('.top-right { gap: 4px; }'), '带子内右侧 gap 应收到 4px');
     const base1400 = css20.slice(css20.indexOf('@media (max-width: 1500px)'), bandAt);
     assert.ok(base1400.includes('#globalSearchInput { width: 140px; }'), '1500 断点仍应是搜索框 140px（1024 不动）');
     assert.ok(base1400.includes('#topbar { gap: 8px; }'), '1500 断点仍应是顶栏 gap 8px（1024 不动）');
@@ -4949,6 +4952,8 @@ async function main() {
   // 修前沙箱探针：容器 145px、7 项需 533px（12px 内边距）、副标题 260px 可见，
   // 只有首页可见；修后容器 586px、7 项需 449px（6px 内边距），余 137px。
   // 1280/1024 的规则与沙箱实测数与修前完全一致（回归）。
+  // v0.3.17 修复轮带子又收紧一次（ghost 6px、搜索 90px、右侧 gap 4px，
+  // 见 §23），沙箱 1440 英文容器 586→618px，以下按当前数断言。
   {
     const m1500 = css20.match(/@media \(max-width: 1500px\) \{([\s\S]*?)\n\}/);
     assert.ok(m1500, '应有 1500px 断点（副标题藏到 1500px，覆盖 1440）');
@@ -4957,27 +4962,29 @@ async function main() {
     assert.ok(m1500[1].includes('#globalSearchInput { width: 140px; }'), '1500px 以下搜索框应为 140px');
     const bandAt21 = css20.indexOf('@media (min-width: 1101px) and (max-width: 1500px)');
     assert.ok(bandAt21 >= 0, '收紧带子应为 1101–1500px（覆盖 1440，1024 不进带子）');
-    const bandEnd21 = css20.indexOf('}', css20.indexOf('#globalSearchInput { width: 100px; }', bandAt21)) + 1;
+    const bandEnd21 = css20.indexOf('}', css20.indexOf('#globalSearchInput { width: 90px; }', bandAt21)) + 1;
     const band21 = css20.slice(bandAt21, bandEnd21);
-    assert.ok(band21.includes('.top-right .btn.ghost { padding: 7px 8px; }'), '带子内右侧 ghost 按钮应收紧到 8px 内边距');
-    assert.ok(band21.includes('#globalSearchInput { width: 100px; }'), '带子内搜索框应收到 100px');
+    assert.ok(band21.includes('.top-right .btn.ghost { padding: 7px 6px; }'), '带子内右侧 ghost 按钮应收紧到 6px 内边距');
+    assert.ok(band21.includes('#globalSearchInput { width: 90px; }'), '带子内搜索框应收到 90px');
     assert.ok(band21.includes('#topbar { gap: 6px; }'), '带子内顶栏 gap 应收到 6px');
-    assert.ok(band21.includes('.top-right { gap: 6px; }'), '带子内右侧 gap 应收到 6px');
+    assert.ok(band21.includes('.top-right { gap: 4px; }'), '带子内右侧 gap 应收到 4px');
     // 算术（沙箱 xvfb Electron 真机探针 2026-11-27，登录态）：
     // 修前 1440 英文：品牌 362（含副标题 260）+ 右侧 877 + 两侧 gap 24 +
     // 顶栏 padding 32 = 1295，容器 1440-1295=145；7 项 65+61+59+68+101+60+91
     // =505，+7×4 gap=533，缺 388px。
-    // 修后：副标题藏（-270，含 gap）、搜索 190→100（-90）、ghost 收紧
+    // 修后（v0.3.16）：副标题藏（-270，含 gap）、搜索 190→100（-90）、ghost 收紧
     // （347→311，-36）、gap 12/10→6（-44）、导航内边距 12→6（7 项 -84）；
     // 容器 145+441=586，7 项 53+49+47+56+89+48+79=421，+7×4 gap=449，余 137px。
+    // v0.3.17 再收紧：ghost 8→6（-20）、搜索 100→90（-10）、右侧 gap 6→4
+    // （-18），容器 586→618px，余 169px（沙箱探针实测，见 §23）。
     const navNeed1440en = 53 + 49 + 47 + 56 + 89 + 48 + 79 + 7 * 4;
-    const container1440en = 586;
+    const container1440en = 618;
     assert.strictEqual(navNeed1440en, 449, '1440 英文 7 项共需 449px（6px 内边距，探针实测）');
     assert.ok(container1440en >= navNeed1440en, `修后 1440 英文容器应放得下 7 项（${container1440en}≥${navNeed1440en}，余 ${container1440en - navNeed1440en}px）`);
     // greedyNavFit 在 1440 英文输入下不应溢出（More 隐藏）。
     const greedyNavFit21 = new Function(`${extractFn20('greedyNavFit')}; return greedyNavFit;`)();
     assert.deepStrictEqual(
-      greedyNavFit21([57, 53, 51, 60, 93, 52, 83], 586, 70),
+      greedyNavFit21([57, 53, 51, 60, 93, 52, 83], 618, 70),
       { visible: [0, 1, 2, 3, 4, 5, 6], overflow: [] },
       '1440 英文下 greedyNavFit 应 7 项全可见、More 隐藏');
     // 回归：1280 仍在带子内（验收线不受影响）、1024 仍在带子外、
@@ -4986,7 +4993,7 @@ async function main() {
     assert.ok(1024 < 1101, '带子下限 1101 应把 1024 排除在外（1024 More 行为不动）');
     assert.ok(css20.includes('@media (max-width: 1000px)'), '1000px 断点应保留');
     assert.ok(css20.includes('#sseText { display: none; }'), '1000px 以下状态文字仍应隐藏');
-    ok('1440 英文顶栏：副标题藏到 1500px、带子上提、容器 586≥449、More 隐藏、1280/1024 规则未变');
+    ok('1440 英文顶栏：副标题藏到 1500px、带子上提、容器 618≥449、More 隐藏、1280/1024 规则未变');
   }
 
   console.log('== 22. v0.3.17：品牌名跟随语言（奇美拉 / Chimera）==');
@@ -5044,6 +5051,145 @@ async function main() {
     const pkg22 = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
     assert.strictEqual(pkg22.version, '0.3.17', 'package.json 版本应为 0.3.17');
     ok('renderer.js 动态 alt + package.json 0.3.17；数据内容未动');
+  }
+
+  console.log('== 23. v0.3.17 修复轮：1280px 英文顶栏溢出（品牌名变宽顶掉 Node）==');
+  // 回归：v0.3.17 把品牌名改成跟语言（Chimera 比 奇美拉宽约 17px），
+  // lenghao 1280 英文容器 421px、7 项需 433px，差 12px，Node 被顶进 More
+  // （走查 Driver A 101/104，3 失败全是这一项；1440 英文 584/433 不受影响）。
+  // 修法（CSS-only，带子内）：ghost 内边距 8px→6px（5 个 × 4px = 20px）、
+  // 搜索框 100px→90px（10px）、右侧 gap 6px→4px（9 个间隙 × 2px = 18px），
+  // 理论共收 48px。三项全是精确长度（与字体无关），修后 lenghao 容器应为
+  // 421+48=469px，余 36px；走查重跑时以实测为准（见走查报告）。
+  {
+    // 回归锁定：修前 lenghao 1280 英文确实放不下（421 < 433，差 12px）。
+    const container1280enBefore = 421;
+    const navNeed1280enLenghao = 54 + 51 + 50 + 58 + 89 + 50 + 81;
+    assert.strictEqual(navNeed1280enLenghao, 433, 'lenghao 1280 英文 7 项共需 433px（走查探针实测）');
+    assert.ok(container1280enBefore < navNeed1280enLenghao, `修前容器应放不下 7 项（${container1280enBefore}<${navNeed1280enLenghao}，差 ${navNeed1280enLenghao - container1280enBefore}px，Node 进 More）`);
+    // 修后算术：lenghao 421+48=469 ≥ 433，余 36px。
+    const container1280enAfter = container1280enBefore + 5 * 4 + 10 + 9 * 2;
+    assert.strictEqual(container1280enAfter, 469, '修后 lenghao 容器应为 421+48=469px');
+    assert.ok(container1280enAfter >= navNeed1280enLenghao, `修后容器应放得下 7 项（${container1280enAfter}≥${navNeed1280enLenghao}，余 ${container1280enAfter - navNeed1280enLenghao}px）`);
+    // 修后实测（沙箱 xvfb Electron 真机探针，登录态，修后代码）：
+    // 1280 英文容器 458px、7 项需 449px（沙箱字体更宽），余 9px，7/7、
+    // More 隐藏；1280 中文 562px、需 334px，余 228px。
+    const container1280enSandbox = 458;
+    const navNeed1280enSandbox = 57 + 53 + 51 + 60 + 93 + 52 + 83;
+    assert.strictEqual(navNeed1280enSandbox, 449, '沙箱 1280 英文 7 项共需 449px（探针实测）');
+    assert.ok(container1280enSandbox >= navNeed1280enSandbox, `沙箱修后容器应放得下 7 项（${container1280enSandbox}≥${navNeed1280enSandbox}，余 ${container1280enSandbox - navNeed1280enSandbox}px）`);
+    const container1280zhSandbox = 562;
+    const navNeed1280zhSandbox = 44 + 44 + 44 + 44 + 44 + 44 + 70;
+    assert.strictEqual(navNeed1280zhSandbox, 334, '沙箱 1280 中文 7 项共需 334px（探针实测）');
+    assert.ok(container1280zhSandbox >= navNeed1280zhSandbox, '沙箱 1280 中文容器应放得下 7 项');
+    // greedyNavFit：修后两套宽度在各自容器下都不应溢出（More 隐藏）。
+    const greedyNavFit23 = new Function(`${extractFn20('greedyNavFit')}; return greedyNavFit;`)();
+    assert.deepStrictEqual(
+      greedyNavFit23([57, 53, 51, 60, 93, 52, 83], 458, 61),
+      { visible: [0, 1, 2, 3, 4, 5, 6], overflow: [] },
+      '沙箱 1280 英文下 greedyNavFit 应 7 项全可见、More 隐藏');
+    assert.deepStrictEqual(
+      greedyNavFit23([54, 51, 50, 58, 89, 50, 81], 469, 60),
+      { visible: [0, 1, 2, 3, 4, 5, 6], overflow: [] },
+      'lenghao 1280 英文下 greedyNavFit 应 7 项全可见、More 隐藏');
+    // 回归：1024 仍在带子外（带子下限 1101 不变），1000px 规则保留。
+    assert.ok(css20.includes('@media (min-width: 1101px) and (max-width: 1500px)'), '带子仍应为 1101–1500px');
+    assert.ok(css20.includes('@media (max-width: 1000px)'), '1000px 断点应保留');
+    ok('1280 英文顶栏修复：带子再收 48px、lenghao 469≥433、沙箱 458≥449、More 隐藏');
+  }
+
+  console.log('== 24. v0.3.17 修复轮：macOS 原生菜单本地化 ==');
+  // 背景：应用从没建过菜单，macOS 上一直是 Electron 默认英文菜单
+  // （File / Edit / View / Window / Help，Minimize / Zoom / Close 全英文），
+  // 而应用内早已是中文。修法：lib/appMenu.js 按字典 menu.* 键逐项写死
+  // label（role 只管行为），语言切换时重建；只在 darwin 上建菜单，
+  // Windows/Linux 不设菜单、本就不显示菜单栏，行为不动。
+  // 原生 macOS 菜单栏在 lenghao Linux 走查里看不到，不进 CDP 断言；
+  // Mac 实机效果待发版后在 Mac 上验。
+  {
+    // 24a. 字典：24 个 menu.* 键中英齐全、值非空；带 %s 的三项中英各一个 %s。
+    const menuKeys = Object.keys(tr._uiStrings.zh).filter((k) => k.startsWith('menu.')).sort();
+    assert.strictEqual(menuKeys.length, 24, '字典应有 24 个 menu.* 键');
+    for (const k of menuKeys) {
+      assert.ok(tr._uiStrings.zh[k] && tr._uiStrings.zh[k].length > 0, `中文 menu 键 ${k} 应非空`);
+      assert.ok(tr._uiStrings.en[k] && tr._uiStrings.en[k].length > 0, `英文 menu 键 ${k} 应非空`);
+    }
+    for (const k of ['menu.appAbout', 'menu.appHide', 'menu.appQuit']) {
+      const pct = (s) => (s.match(/%s/g) || []).length;
+      assert.strictEqual(pct(tr._uiStrings.zh[k]), 1, `中文 ${k} 应含 1 个 %s（品牌名）`);
+      assert.strictEqual(pct(tr._uiStrings.en[k]), 1, `英文 ${k} 应含 1 个 %s（品牌名）`);
+    }
+    const zhKeys24 = Object.keys(tr._uiStrings.zh).sort();
+    const enKeys24 = Object.keys(tr._uiStrings.en).sort();
+    assert.deepStrictEqual(enKeys24, zhKeys24, '加 menu.* 后中英 key 集仍应完全一致');
+    ok('字典 menu.*：24 键中英齐全、%s 个数一致、key 集仍一致');
+  }
+  // 24b. 模板纯函数：中文 6 个顶级菜单 + 应用菜单 About/Hide/Quit 走品牌名。
+  {
+    const zhTpl = buildAppMenuTemplate('zh', tr._uiStrings.zh);
+    assert.deepStrictEqual(
+      zhTpl.map((m) => m.label),
+      ['奇美拉', '文件', '编辑', '视图', '窗口', '帮助'],
+      '中文模板顶级菜单应为 奇美拉/文件/编辑/视图/窗口/帮助');
+    const zhApp = zhTpl[0].submenu.filter((i) => i.label);
+    assert.deepStrictEqual(
+      zhApp.map((i) => i.label),
+      ['关于奇美拉', '隐藏奇美拉', '隐藏其他', '全部显示', '退出奇美拉'],
+      '中文应用菜单应为 关于/隐藏/隐藏其他/全部显示/退出奇美拉');
+    assert.strictEqual(zhTpl[0].submenu[0].role, 'about', '关于项应走 about 行为');
+    assert.strictEqual(zhTpl[0].submenu[zhTpl[0].submenu.length - 1].role, 'quit', '退出项应走 quit 行为');
+    const zhWindow = zhTpl[4].submenu.filter((i) => i.label);
+    assert.deepStrictEqual(
+      zhWindow.map((i) => i.label),
+      ['最小化', '缩放', '关闭', '前置全部窗口'],
+      '中文窗口菜单应为 最小化/缩放/关闭/前置全部窗口');
+    assert.deepStrictEqual(
+      zhWindow.map((i) => i.role),
+      ['minimize', 'zoom', 'close', 'front'],
+      '窗口菜单项应走 minimize/zoom/close/front 行为');
+    const zhEdit = zhTpl[2].submenu.filter((i) => i.label);
+    assert.deepStrictEqual(
+      zhEdit.map((i) => i.role),
+      ['undo', 'redo', 'cut', 'copy', 'paste', 'selectAll'],
+      '编辑菜单应走标准 undo/redo/cut/copy/paste/selectAll 行为');
+    assert.strictEqual(typeof zhTpl[5].submenu[0].click, 'function', '帮助菜单的论坛项应有点击动作');
+    ok('中文菜单模板：6 菜单、应用菜单走品牌名、窗口/编辑 role 齐全');
+  }
+  // 24c. 英文模板：同一结构，文案全英文；品牌名跟语言（Chimera）。
+  {
+    const enTpl = buildAppMenuTemplate('en', tr._uiStrings.en);
+    assert.deepStrictEqual(
+      enTpl.map((m) => m.label),
+      ['Chimera', 'File', 'Edit', 'View', 'Window', 'Help'],
+      '英文模板顶级菜单应为 Chimera/File/Edit/View/Window/Help');
+    const enApp = enTpl[0].submenu.filter((i) => i.label);
+    assert.deepStrictEqual(
+      enApp.map((i) => i.label),
+      ['About Chimera', 'Hide Chimera', 'Hide Others', 'Show All', 'Quit Chimera'],
+      '英文应用菜单应为 About/Hide/Hide Others/Show All/Quit Chimera');
+    const enWindow = enTpl[4].submenu.filter((i) => i.label);
+    assert.deepStrictEqual(
+      enWindow.map((i) => i.label),
+      ['Minimize', 'Zoom', 'Close', 'Bring All to Front'],
+      '英文窗口菜单应为 Minimize/Zoom/Close/Bring All to Front');
+    ok('英文菜单模板：6 菜单、品牌名 Chimera、窗口项全英文');
+  }
+  // 24d. 平台口径 + 接线：非 darwin 上 applyAppMenu 返回 false 且绝不建菜单；
+  // main/preload/renderer 三处接线齐全（字符串断言，走既有语言切换链路）。
+  {
+    assert.strictEqual(applyAppMenu('zh', tr._uiStrings.zh), false, 'Linux 上 applyAppMenu 应返回 false（不建菜单）');
+    assert.strictEqual(applyAppMenu('en', tr._uiStrings.en), false, 'Linux 上英文 applyAppMenu 也应返回 false');
+    const appMenuSrc = fs.readFileSync(path.join(__dirname, '..', 'lib', 'appMenu.js'), 'utf8');
+    assert.ok(appMenuSrc.includes("process.platform !== 'darwin'"), 'appMenu 应有 darwin 门禁');
+    const mainSrc24 = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+    assert.ok(mainSrc24.includes("ipcMain.handle('app:set-lang'"), 'main.js 应有 app:set-lang 处理');
+    assert.ok(mainSrc24.includes('applyAppMenu('), 'main.js 应调用 applyAppMenu');
+    const preloadSrc24 = fs.readFileSync(path.join(__dirname, '..', 'preload.js'), 'utf8');
+    assert.ok(preloadSrc24.includes("setLang: (lang) => ipcRenderer.invoke('app:set-lang', lang)"), 'preload 应暴露 app.setLang');
+    const rendererSrc24 = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'renderer.js'), 'utf8');
+    assert.ok(rendererSrc24.includes('window.chimera.app.setLang(next)'), '语言切换时渲染进程应通知主进程重建菜单');
+    assert.ok(rendererSrc24.includes('window.chimera.app.setLang(state.lang)'), '启动时渲染进程应按存的语言通知主进程一次');
+    ok('平台口径：非 darwin 不建菜单；main/preload/renderer 接线齐全');
   }
 
   console.log(`\nPASS: ${passed} 项全过`);

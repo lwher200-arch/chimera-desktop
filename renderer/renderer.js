@@ -2469,6 +2469,8 @@ $('langToggle').addEventListener('click', async () => {
   const next = state.lang === 'zh' ? 'en' : 'zh';
   if (window.ChimeraTranslate) window.ChimeraTranslate.setViewerLang(next);
   state.lang = next;
+  // macOS 原生菜单跟语言（v0.3.17 修复轮）：通知主进程重建菜单。
+  if (window.chimera.app) window.chimera.app.setLang(next);
   syncChrome();
   // 目标语言变了：已渲染的译文框按新目标重译（重拉当前视图即可）。
   if (state.open) await loadMessages();
@@ -2482,3 +2484,7 @@ $('langToggle').addEventListener('click', async () => {
 
 syncChrome();
 boot();
+
+// macOS 原生菜单跟语言（v0.3.17 修复轮）：启动时按存的语言通知主进程一次
+// （主进程启动时先按默认中文建过一份，这里纠正为实际语言）。
+if (typeof window !== 'undefined' && window.chimera && window.chimera.app) window.chimera.app.setLang(state.lang);

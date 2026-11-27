@@ -74,6 +74,11 @@ contextBridge.exposeInMainWorld('chimera', {
     headers: (limit) => ipcRenderer.invoke('node:headers', limit),
     activate: () => ipcRenderer.invoke('node:activate'),
   },
+  // macOS 原生菜单跟语言（v0.3.17 修复轮）：启动与切换语言后通知主进程
+  // 重建菜单；Linux/Windows 上主进程直接忽略，不出菜单栏。
+  app: {
+    setLang: (lang) => ipcRenderer.invoke('app:set-lang', lang),
+  },
   // 实时（WS 优先）：typing / receipt 走 WS 通道；SSE 回落时返回 false，
   // 调用方仍可走 REST。渲染进程暂未调用，供后续接线用。
   realtime: {

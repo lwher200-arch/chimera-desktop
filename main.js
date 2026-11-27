@@ -24,6 +24,8 @@ const { ServerResolver, PRIMARY_BASE } = require('./lib/serverResolver');
 const { AppUpdater } = require('./lib/appUpdater');
 const workspaceBinding = require('./lib/workspaceBinding');
 const doRegistry = require('./lib/doRegistry');
+const { applyAppMenu } = require('./lib/appMenu');
+const { _uiStrings } = require('./renderer/translate');
 const os = require('node:os');
 
 const API_BASE = process.env.CHIMERA_API_BASE || PRIMARY_BASE;
@@ -308,6 +310,14 @@ async function initNode() {
 
 // ---- IPC ----
 function registerIpc() {
+  // macOS 原生菜单跟语言（v0.3.17 修复轮）：渲染进程在启动与每次切换语言
+  // 后通知主进程重建菜单；非 darwin 上 applyAppMenu 直接返回 false。
+  // 不走 guardApi：与登录态无关，匿名也应生效。
+  ipcMain.handle('app:set-lang', (_e, lang) => {
+    const l = (lang === 'en') ? 'en' : 'zh';
+    return applyAppMenu(l, _uiStrings[l]);
+  });
+
   ipcMain.handle('session:get', () => {
     const s = store.state.session;
     return s ? { username: s.username, expiresAt: s.expiresAt } : null;
@@ -634,6 +644,10 @@ if (!gotSingleInstanceLock) {
     return;
   }
   createWindow();
+  // macOS 原生菜单（v0.3.17 修复轮）：先按默认中文建一份，渲染进程启动后
+  // 按存的语言（localStorage chimera_lang）经 app:set-lang 通知一次；
+  // 非 darwin 上 applyAppMenu 直接返回 false，菜单栏不出现，行为不动。
+  applyAppMenu('zh', _uiStrings.zh);
   initOutbox();
   registerIpc();
   startRealtime();
