@@ -559,6 +559,21 @@ select {
   .top-right { gap: 8px; }
   #globalSearchInput { width: 140px; }
 }
+/* 顶栏再收紧（v0.3.15 修复轮，1101–1400px 带子）：v0.3.15 新加的铃铛 +
+   齿轮各占 46px，1280 英文下导航容器只剩 345px、7 项共需 433px，差
+   88px，Team/Node 被收进 More。带子内收回约 120px：右侧 ghost 按钮
+   内边距 14px→8px（主题/语言/铃铛/齿轮/退出 5 个 × 12px = 60px）、
+   搜索框 140px→100px（40px）、两侧 gap 8px→6px（20px），容器回到
+   约 465px，余约 32px。带子从 1101px 起：1024px 的 More 菜单内容与
+   点菜单切页保持原样（1024 英文容器仅 89px、7 项全在菜单里，是既定
+   行为）；1400px 以上不动（1440 英文另有品牌副标题撑满的既存溢出，
+   不在本轮范围）。 */
+@media (min-width: 1101px) and (max-width: 1400px) {
+  #topbar { gap: 6px; }
+  .top-right { gap: 6px; }
+  .top-right .btn.ghost { padding: 7px 8px; }
+  #globalSearchInput { width: 100px; }
+}
 @media (max-width: 1000px) {
   #layout { grid-template-columns: 240px minmax(0, 1fr); }
   #rightbar { display: none; }

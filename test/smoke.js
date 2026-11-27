@@ -4575,6 +4575,99 @@ async function main() {
     assert.deepStrictEqual(notifTarget(null), { kind: 'profile', name: '' }, '空条目应回空资料卡目标');
     ok('通知纯函数：@过滤只留 mention / 未读水位边界 / 动词 / 跳转目标');
   }
+  // 20j. 帖子目标 @提醒（v0.3.15 修复轮）：mock 一条帖子 @，列表应渲染出
+  // post 目标，跳转判定应是帖子页。走查 live 数据里 20 条 @ 全是群聊提醒、
+  // 没有帖子目标条目可点，故跳转用单元测试覆盖；驱动遇无帖子目标时跳过。
+  {
+    const uiFn = new Function(`${extractFn20('ui')}; return ui;`)();
+    const escFn = new Function(`${extractFn20('esc')}; return esc;`)();
+    const avatarClassFn = new Function(`${extractFn20('avatarClass')}; return avatarClass;`)();
+    const avatarInitialFn = new Function(`${extractFn20('avatarInitial')}; return avatarInitial;`)();
+    const avatarHtmlFn = new Function(`${extractFn20('avatarHtml')}; return avatarHtml;`)();
+    const fmtTimeFn = new Function(`${extractFn20('fmtTime')}; return fmtTime;`)();
+    const notifTargetFn = new Function(`${extractFn20('notifTarget')}; return notifTarget;`)();
+    const notifVerbFn = new Function('ui', `${extractFn20('notifVerb')}; return notifVerb;`)(uiFn);
+    const notifJumpTargetFn = new Function(`${extractFn20('notifJumpTarget')}; return notifJumpTarget;`)();
+    const renderNotifListFn = new Function(`${extractFn20('renderNotifList')}; return renderNotifList;`)();
+    const boxEl = {
+      _html: '',
+      set innerHTML(v) { this._html = v; },
+      get innerHTML() { return this._html; },
+    };
+    globalThis.window = { ChimeraTranslate: tr };
+    globalThis.document = {
+      getElementById: (id) => (id === 'notifList' ? boxEl : null),
+      querySelectorAll: () => [],
+    };
+    globalThis.$ = (id) => globalThis.document.getElementById(id);
+    globalThis.ui = uiFn;
+    globalThis.esc = escFn;
+    globalThis.avatarClass = avatarClassFn;
+    globalThis.avatarInitial = avatarInitialFn;
+    globalThis.avatarHtml = avatarHtmlFn;
+    globalThis.fmtTime = fmtTimeFn;
+    globalThis.notifTarget = notifTargetFn;
+    globalThis.notifVerb = notifVerbFn;
+    globalThis.state = {
+      notif: {
+        items: [{ id: 'mention:p1', type: 'mention', ts: '2026-11-25T10:00:00.000Z', actor: { name: 'a', type: 'human' }, postId: 'p1', preview: '@你看这个帖子' }],
+        loaded: true,
+        readTs: null,
+      },
+    };
+    try {
+      tr.setViewerLang('zh');
+      renderNotifListFn();
+      assert.ok(boxEl.innerHTML.includes('data-target-kind="post"'), '帖子 @ 应渲染为 post 目标');
+      assert.ok(boxEl.innerHTML.includes('data-target-id="p1"'), '帖子 @ 应带帖子 id');
+      assert.ok(boxEl.innerHTML.includes('@ 了你'), '帖子 @ 仍应带 @动词');
+      assert.deepStrictEqual(notifJumpTargetFn('post', 'p1', ''), { pane: 'posts' }, 'post 目标应跳帖子页');
+      assert.deepStrictEqual(notifJumpTargetFn('group', 'g1', ''), { conv: ['group', 'g1'] }, '群聊目标应进群');
+      assert.deepStrictEqual(notifJumpTargetFn('profile', '', 'e'), { profile: 'e' }, '资料卡目标应看 @人');
+      assert.strictEqual(notifJumpTargetFn('group', '', ''), null, '群聊无 id 应无跳转');
+      assert.strictEqual(notifJumpTargetFn('profile', '', ''), null, '资料卡无名字应无跳转');
+      ok('帖子 @ 渲染 post 目标 + 跳转判定帖子页/群聊/资料卡');
+    } finally {
+      delete globalThis.window;
+      delete globalThis.document;
+      delete globalThis.$;
+      delete globalThis.ui;
+      delete globalThis.esc;
+      delete globalThis.avatarClass;
+      delete globalThis.avatarInitial;
+      delete globalThis.avatarHtml;
+      delete globalThis.fmtTime;
+      delete globalThis.notifTarget;
+      delete globalThis.notifVerb;
+      delete globalThis.state;
+      tr._resetForTest();
+    }
+  }
+  // 20k. 顶栏收紧带子（v0.3.15 修复轮）：1280 英文下铃铛/齿轮各占 46px，
+  // 导航容器只剩 345px、7 项共需 433px，差 88px。1101–1400px 带子收回约
+  // 120px（右侧 ghost 按钮 5×12 + 搜索框 40 + 两侧 gap 20），容器回到约
+  // 465px。带子从 1101px 起，1024px 的规则原样不动。
+  {
+    const bandAt = css20.indexOf('@media (min-width: 1101px) and (max-width: 1400px)');
+    assert.ok(bandAt >= 0, '应有 1101–1400px 顶栏收紧带子');
+    const bandEnd = css20.indexOf('}', css20.indexOf('#globalSearchInput { width: 100px; }', bandAt)) + 1;
+    const band = css20.slice(bandAt, bandEnd);
+    assert.ok(band.includes('.top-right .btn.ghost { padding: 7px 8px; }'), '带子内右侧 ghost 按钮应收紧到 8px 内边距');
+    assert.ok(band.includes('#globalSearchInput { width: 100px; }'), '带子内搜索框应收到 100px');
+    assert.ok(band.includes('#topbar { gap: 6px; }'), '带子内顶栏 gap 应收到 6px');
+    assert.ok(band.includes('.top-right { gap: 6px; }'), '带子内右侧 gap 应收到 6px');
+    const base1400 = css20.slice(css20.indexOf('@media (max-width: 1400px)'), bandAt);
+    assert.ok(base1400.includes('#globalSearchInput { width: 140px; }'), '1400 断点仍应是搜索框 140px（1024 不动）');
+    assert.ok(base1400.includes('#topbar { gap: 8px; }'), '1400 断点仍应是顶栏 gap 8px（1024 不动）');
+    // 算术（探针 2026-11-27 真机实测）：7 项宽 54+51+50+58+89+50+81=433；
+    // 收回 = ghost 5×12 + 搜索 40 + gap 20 = 120；345+120=465 ≥ 433。
+    const navNeed1280en = 54 + 51 + 50 + 58 + 89 + 50 + 81;
+    const container1280en = 345;
+    const recovered = 5 * 12 + 40 + 20;
+    assert.strictEqual(navNeed1280en, 433, '1280 英文 7 项共需 433px（探针实测）');
+    assert.ok(container1280en + recovered >= navNeed1280en, `收紧后容器应放得下 7 项（${container1280en}+${recovered}≥${navNeed1280en}）`);
+    ok('顶栏收紧带子：规则齐全、1024 原样、1280 英文算术放得下');
+  }
   // 20b. ForumClient 通知接口（mock 论坛）：全类型回包 + 标记已读清零 + 未登录 401。
   {
     const mock20 = await startMockForum();

@@ -2180,16 +2180,24 @@ $('notifMarkReadBtn').addEventListener('click', async () => {
     // 标记已读失败不清空徽标，下次再点；不弹 alert 挡阅读。
   } finally { btn.disabled = false; }
 });
-// 点条目跳转：帖子 → 帖子页，群聊 → 打开该群，否则 → @人资料卡。
-// 人名按钮走全局资料卡处理，这里跳过（避免一次点击开两个地方）。
+// 点条目跳哪（v0.3.15 修复轮：抽成纯函数可单测）：帖子 → 帖子页，
+// 群聊 → 打开该群，否则 → @人资料卡；无有效目标回 null。
+function notifJumpTarget(kind, id, name) {
+  if (kind === 'post') return { pane: 'posts' };
+  if (kind === 'group' && id) return { conv: ['group', id] };
+  if (kind === 'profile' && name) return { profile: name };
+  return null;
+}
+// 点条目跳转。人名按钮走全局资料卡处理，这里跳过（避免一次点击开两个地方）。
 $('notifList').addEventListener('click', (e) => {
   if (e.target.closest('[data-profile]')) return;
   const item = e.target.closest('.notif-item');
   if (!item) return;
-  const kind = item.dataset.targetKind;
-  if (kind === 'post') { showPane('posts'); return; }
-  if (kind === 'group' && item.dataset.targetId) { openConv('group', item.dataset.targetId); return; }
-  if (kind === 'profile' && item.dataset.targetName) { openProfile(item.dataset.targetName); }
+  const jump = notifJumpTarget(item.dataset.targetKind, item.dataset.targetId, item.dataset.targetName);
+  if (!jump) return;
+  if (jump.pane) { showPane(jump.pane); return; }
+  if (jump.conv) { openConv(jump.conv[0], jump.conv[1]); return; }
+  if (jump.profile) { openProfile(jump.profile); }
 });
 
 // ---------- 设置（v0.3.15，只读） ----------
