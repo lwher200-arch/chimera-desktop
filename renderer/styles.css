@@ -546,29 +546,33 @@ select {
 .profile-stats { margin: 8px 0; }
 .tag-chip { font-size: 12px; border-radius: 999px; padding: 1px 9px; background: var(--surface-2); border: 1px solid var(--border-strong); color: var(--muted); }
 .modal-card .comm-form label { display: flex; flex-direction: column; gap: 4px; }
-/* 窄屏顶栏（v0.3.1 走查，v0.3.8 上提到 1400px）：1400px 以下藏品牌副标题、
-   收紧导航间距、收窄搜索框，让 7 个导航在 1280px 下中英文都放得下；
-   v0.3.13：导航内边距 8px→6px——英文 1280 下 7 项共需 462px、容器只剩
+/* 窄屏顶栏（v0.3.1 走查，v0.3.8 上提到 1400px，v0.3.16 提到 1500px）：
+   1500px 以下藏品牌副标题、收紧导航间距、收窄搜索框，让 7 个导航在 1280px
+   下中英文都放得下；v0.3.16 把上限从 1400 提至 1500：1440 英文下品牌副标
+   题（沙箱探针 260px、lenghao 约 347px）把导航容器压到只剩约 145–176px、
+   7 项共需 533px（6px 内边距时 449px），只有首页可见，藏副标题是最大一笔
+   收回；v0.3.13：导航内边距 8px→6px——英文 1280 下 7 项共需 462px、容器只剩
    453px（右侧语言/退出按钮变宽 + 节点按钮带状态徽章最宽），8px 时节点
    被收进 More，6px 后余 19px 空隙；1000px 以下状态 pill 只留圆点，
    不让导航与右侧按钮叠在一起。 */
-@media (max-width: 1400px) {
+@media (max-width: 1500px) {
   .brand .sub { display: none; }
   .nav-btn { padding: 7px 6px; }
   #topbar { gap: 8px; }
   .top-right { gap: 8px; }
   #globalSearchInput { width: 140px; }
 }
-/* 顶栏再收紧（v0.3.15 修复轮，1101–1400px 带子）：v0.3.15 新加的铃铛 +
-   齿轮各占 46px，1280 英文下导航容器只剩 345px、7 项共需 433px，差
-   88px，Team/Node 被收进 More。带子内收回约 120px：右侧 ghost 按钮
-   内边距 14px→8px（主题/语言/铃铛/齿轮/退出 5 个 × 12px = 60px）、
-   搜索框 140px→100px（40px）、两侧 gap 8px→6px（20px），容器回到
-   约 465px，余约 32px。带子从 1101px 起：1024px 的 More 菜单内容与
+/* 顶栏再收紧（v0.3.15 修复轮 1101–1400px 带子，v0.3.16 上提到 1500px）：
+   v0.3.15 新加的铃铛 + 齿轮各占 46px，1280 英文下导航容器只剩 345px、
+   7 项共需 433px，差 88px，Team/Node 被收进 More。带子内收回约 120px：
+   右侧 ghost 按钮内边距 14px→8px（主题/语言/铃铛/齿轮/退出 5 个 × 12px
+   = 60px）、搜索框 140px→100px（40px）、两侧 gap 8px→6px（20px），容器
+   回到约 465px，余约 32px。带子从 1101px 起：1024px 的 More 菜单内容与
    点菜单切页保持原样（1024 英文容器仅 89px、7 项全在菜单里，是既定
-   行为）；1400px 以上不动（1440 英文另有品牌副标题撑满的既存溢出，
-   不在本轮范围）。 */
-@media (min-width: 1101px) and (max-width: 1400px) {
+   行为）。v0.3.16：1440 英文也在带子内，副标题一并藏掉（上条规则已提到
+   1500px），1440 容器回到约 587px、7 项需 449px，余约 138px（沙箱探针
+   实测，见 §21）；1500px 以上恢复原样（1920px 宽下原样也放得下）。 */
+@media (min-width: 1101px) and (max-width: 1500px) {
   #topbar { gap: 6px; }
   .top-right { gap: 6px; }
   .top-right .btn.ghost { padding: 7px 8px; }

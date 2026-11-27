@@ -3026,19 +3026,19 @@ async function main() {
   }
 
   console.log('== 13. 顶栏溢出修复 + 全内容跟随语言（v0.3.8）==');
-  // 13a. 顶栏 CSS：1400px 断点收紧、导航可横向滚动兜底、1000px 规则保留。
+  // 13a. 顶栏 CSS：1500px 断点收紧（v0.3.16 由 1400 提至 1500，覆盖 1440）、导航可横向滚动兜底、1000px 规则保留。
   {
     const css = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'styles.css'), 'utf8');
-    const m1400 = css.match(/@media \(max-width: 1400px\) \{([\s\S]*?)\n\}/);
-    assert.ok(m1400, '应有 1400px 断点');
-    assert.ok(m1400[1].includes('.brand .sub { display: none; }'), '1400px 以下应藏品牌副标题');
-    assert.ok(m1400[1].includes('#globalSearchInput { width: 140px; }'), '1400px 以下搜索框应收窄到 140px');
-    assert.ok(m1400[1].includes('.nav-btn { padding: 7px 6px; }'), '1400px 以下导航按钮应收紧内边距（v0.3.13：8px 时英文 1280 下节点被收进 More，6px 才放得下 7 项）');
+    const m1400 = css.match(/@media \(max-width: 1500px\) \{([\s\S]*?)\n\}/);
+    assert.ok(m1400, '应有 1500px 断点');
+    assert.ok(m1400[1].includes('.brand .sub { display: none; }'), '1500px 以下应藏品牌副标题');
+    assert.ok(m1400[1].includes('#globalSearchInput { width: 140px; }'), '1500px 以下搜索框应收窄到 140px');
+    assert.ok(m1400[1].includes('.nav-btn { padding: 7px 6px; }'), '1500px 以下导航按钮应收紧内边距（v0.3.13：8px 时英文 1280 下节点被收进 More，6px 才放得下 7 项）');
     assert.ok(/\.topnav-links \{[^}]*overflow-x: auto/.test(css), '导航容器应可横向滚动兜底');
     assert.ok(css.includes('.topnav-links::-webkit-scrollbar { display: none; }'), '导航滚动条应隐藏');
     assert.ok(css.includes('@media (max-width: 1000px)'), '1000px 断点应保留');
     assert.ok(css.includes('#sseText { display: none; }'), '1000px 以下状态文字仍应隐藏');
-    ok('顶栏 CSS：1400px 断点收紧 + 导航横向滚动兜底 + 1000px 规则保留');
+    ok('顶栏 CSS：1500px 断点收紧 + 导航横向滚动兜底 + 1000px 规则保留');
   }
   // 13b–13e 共用：假 localStorage（Node 下没有），用完删掉。
   globalThis.localStorage = {
@@ -4643,22 +4643,22 @@ async function main() {
       tr._resetForTest();
     }
   }
-  // 20k. 顶栏收紧带子（v0.3.15 修复轮）：1280 英文下铃铛/齿轮各占 46px，
-  // 导航容器只剩 345px、7 项共需 433px，差 88px。1101–1400px 带子收回约
+  // 20k. 顶栏收紧带子（v0.3.15 修复轮，v0.3.16 上提到 1500px）：1280 英文下铃铛/齿轮各占 46px，
+  // 导航容器只剩 345px、7 项共需 433px，差 88px。1101–1500px 带子收回约
   // 120px（右侧 ghost 按钮 5×12 + 搜索框 40 + 两侧 gap 20），容器回到约
   // 465px。带子从 1101px 起，1024px 的规则原样不动。
   {
-    const bandAt = css20.indexOf('@media (min-width: 1101px) and (max-width: 1400px)');
-    assert.ok(bandAt >= 0, '应有 1101–1400px 顶栏收紧带子');
+    const bandAt = css20.indexOf('@media (min-width: 1101px) and (max-width: 1500px)');
+    assert.ok(bandAt >= 0, '应有 1101–1500px 顶栏收紧带子');
     const bandEnd = css20.indexOf('}', css20.indexOf('#globalSearchInput { width: 100px; }', bandAt)) + 1;
     const band = css20.slice(bandAt, bandEnd);
     assert.ok(band.includes('.top-right .btn.ghost { padding: 7px 8px; }'), '带子内右侧 ghost 按钮应收紧到 8px 内边距');
     assert.ok(band.includes('#globalSearchInput { width: 100px; }'), '带子内搜索框应收到 100px');
     assert.ok(band.includes('#topbar { gap: 6px; }'), '带子内顶栏 gap 应收到 6px');
     assert.ok(band.includes('.top-right { gap: 6px; }'), '带子内右侧 gap 应收到 6px');
-    const base1400 = css20.slice(css20.indexOf('@media (max-width: 1400px)'), bandAt);
-    assert.ok(base1400.includes('#globalSearchInput { width: 140px; }'), '1400 断点仍应是搜索框 140px（1024 不动）');
-    assert.ok(base1400.includes('#topbar { gap: 8px; }'), '1400 断点仍应是顶栏 gap 8px（1024 不动）');
+    const base1400 = css20.slice(css20.indexOf('@media (max-width: 1500px)'), bandAt);
+    assert.ok(base1400.includes('#globalSearchInput { width: 140px; }'), '1500 断点仍应是搜索框 140px（1024 不动）');
+    assert.ok(base1400.includes('#topbar { gap: 8px; }'), '1500 断点仍应是顶栏 gap 8px（1024 不动）');
     // 算术（探针 2026-11-27 真机实测）：7 项宽 54+51+50+58+89+50+81=433；
     // 收回 = ghost 5×12 + 搜索 40 + gap 20 = 120；345+120=465 ≥ 433。
     const navNeed1280en = 54 + 51 + 50 + 58 + 89 + 50 + 81;
@@ -4942,6 +4942,51 @@ async function main() {
     // 还没恢复就被删掉（v0.3.15 走查前自查发现）。
     assert.ok(showPaneSrc.includes("if (curPostDraft) saveDraft('post:'"), '切帖子页时框空不应存草稿（空串会误删未恢复的草稿）');
     ok('面板与语言切换：showPane 拉取 / syncChrome 只重画 / mention 实时刷徽标 / 草稿存取接线');
+  }
+
+  console.log('== 21. v0.3.16：1440px 英文顶栏溢出修复 ==');
+  // 21a. 1440 英文顶栏（v0.3.16）：副标题藏到 1500px、收紧带子上提到 1500px；
+  // 修前沙箱探针：容器 145px、7 项需 533px（12px 内边距）、副标题 260px 可见，
+  // 只有首页可见；修后容器 586px、7 项需 449px（6px 内边距），余 137px。
+  // 1280/1024 的规则与沙箱实测数与修前完全一致（回归）。
+  {
+    const m1500 = css20.match(/@media \(max-width: 1500px\) \{([\s\S]*?)\n\}/);
+    assert.ok(m1500, '应有 1500px 断点（副标题藏到 1500px，覆盖 1440）');
+    assert.ok(m1500[1].includes('.brand .sub { display: none; }'), '1500px 以下应藏品牌副标题');
+    assert.ok(m1500[1].includes('.nav-btn { padding: 7px 6px; }'), '1500px 以下导航按钮应为 6px 内边距');
+    assert.ok(m1500[1].includes('#globalSearchInput { width: 140px; }'), '1500px 以下搜索框应为 140px');
+    const bandAt21 = css20.indexOf('@media (min-width: 1101px) and (max-width: 1500px)');
+    assert.ok(bandAt21 >= 0, '收紧带子应为 1101–1500px（覆盖 1440，1024 不进带子）');
+    const bandEnd21 = css20.indexOf('}', css20.indexOf('#globalSearchInput { width: 100px; }', bandAt21)) + 1;
+    const band21 = css20.slice(bandAt21, bandEnd21);
+    assert.ok(band21.includes('.top-right .btn.ghost { padding: 7px 8px; }'), '带子内右侧 ghost 按钮应收紧到 8px 内边距');
+    assert.ok(band21.includes('#globalSearchInput { width: 100px; }'), '带子内搜索框应收到 100px');
+    assert.ok(band21.includes('#topbar { gap: 6px; }'), '带子内顶栏 gap 应收到 6px');
+    assert.ok(band21.includes('.top-right { gap: 6px; }'), '带子内右侧 gap 应收到 6px');
+    // 算术（沙箱 xvfb Electron 真机探针 2026-11-27，登录态）：
+    // 修前 1440 英文：品牌 362（含副标题 260）+ 右侧 877 + 两侧 gap 24 +
+    // 顶栏 padding 32 = 1295，容器 1440-1295=145；7 项 65+61+59+68+101+60+91
+    // =505，+7×4 gap=533，缺 388px。
+    // 修后：副标题藏（-270，含 gap）、搜索 190→100（-90）、ghost 收紧
+    // （347→311，-36）、gap 12/10→6（-44）、导航内边距 12→6（7 项 -84）；
+    // 容器 145+441=586，7 项 53+49+47+56+89+48+79=421，+7×4 gap=449，余 137px。
+    const navNeed1440en = 53 + 49 + 47 + 56 + 89 + 48 + 79 + 7 * 4;
+    const container1440en = 586;
+    assert.strictEqual(navNeed1440en, 449, '1440 英文 7 项共需 449px（6px 内边距，探针实测）');
+    assert.ok(container1440en >= navNeed1440en, `修后 1440 英文容器应放得下 7 项（${container1440en}≥${navNeed1440en}，余 ${container1440en - navNeed1440en}px）`);
+    // greedyNavFit 在 1440 英文输入下不应溢出（More 隐藏）。
+    const greedyNavFit21 = new Function(`${extractFn20('greedyNavFit')}; return greedyNavFit;`)();
+    assert.deepStrictEqual(
+      greedyNavFit21([57, 53, 51, 60, 93, 52, 83], 586, 70),
+      { visible: [0, 1, 2, 3, 4, 5, 6], overflow: [] },
+      '1440 英文下 greedyNavFit 应 7 项全可见、More 隐藏');
+    // 回归：1280 仍在带子内（验收线不受影响）、1024 仍在带子外、
+    // 1000px 规则保留；1280/1024 的沙箱实测容器与修前一致（426/74 英文）。
+    assert.ok(1101 <= 1280 && 1280 <= 1500, '带子应仍覆盖 1280（1280 验收线不受影响）');
+    assert.ok(1024 < 1101, '带子下限 1101 应把 1024 排除在外（1024 More 行为不动）');
+    assert.ok(css20.includes('@media (max-width: 1000px)'), '1000px 断点应保留');
+    assert.ok(css20.includes('#sseText { display: none; }'), '1000px 以下状态文字仍应隐藏');
+    ok('1440 英文顶栏：副标题藏到 1500px、带子上提、容器 586≥449、More 隐藏、1280/1024 规则未变');
   }
 
   console.log(`\nPASS: ${passed} 项全过`);
