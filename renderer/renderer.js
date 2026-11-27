@@ -899,7 +899,7 @@ function renderMessages(msgs) {
   // 其余算“更早的消息”，顶上按钮可翻。
   const list = msgs.length > MAX_RENDERED ? msgs.slice(msgs.length - MAX_RENDERED) : msgs;
   if (msgs.length > MAX_RENDERED) state.hasMoreOlder = true;
-  box.innerHTML = list.map((m) => messageHtml(m)).join('') || '<div class="chat-empty" data-empty="1"><img src="assets/brand.png" alt="奇美拉"><b>' + ui('chat.noMsg') + '</b><span>' + ui('chat.noMsgSub') + '</span></div>';
+  box.innerHTML = list.map((m) => messageHtml(m)).join('') || '<div class="chat-empty" data-empty="1"><img src="assets/brand.png" alt="' + ui('brand.name') + '"><b>' + ui('chat.noMsg') + '</b><span>' + ui('chat.noMsgSub') + '</span></div>';
   state.renderedIds = new Set(list.map((m) => m.id).filter(Boolean));
   box.scrollTop = box.scrollHeight;
   if (list.length) state.lastTs = list[list.length - 1].ts;

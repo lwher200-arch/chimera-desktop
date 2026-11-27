@@ -4989,6 +4989,63 @@ async function main() {
     ok('1440 英文顶栏：副标题藏到 1500px、带子上提、容器 586≥449、More 隐藏、1280/1024 规则未变');
   }
 
+  console.log('== 22. v0.3.17：品牌名跟随语言（奇美拉 / Chimera）==');
+  // 22a. 字典：brand.name 中英齐全；key 集仍完全一致（§12a 已全量断言，
+  // 这里单点断言新 key 本身 + 加 key 后 key 集仍对齐）。
+  {
+    assert.strictEqual(tr._uiStrings.zh['brand.name'], '奇美拉', '中文品牌名应为 奇美拉');
+    assert.strictEqual(tr._uiStrings.en['brand.name'], 'Chimera', '英文品牌名应为 Chimera');
+    const zhKeys22 = Object.keys(tr._uiStrings.zh).sort();
+    const enKeys22 = Object.keys(tr._uiStrings.en).sort();
+    assert.deepStrictEqual(enKeys22, zhKeys22, '加 brand.name 后中英 key 集仍应完全一致');
+    ok('字典 brand.name：中文 奇美拉 / 英文 Chimera，key 集仍一致');
+  }
+  // 22b. applyUiLang：品牌名文本 + logo alt 双语切换（假 document）。
+  {
+    const makeEl22 = (key) => ({
+      _text: '', _attrs: { 'data-i18n': key, 'data-i18n-alt': key },
+      get textContent() { return this._text; },
+      set textContent(v) { this._text = v; },
+      getAttribute(k) { return this._attrs[k] || null; },
+      setAttribute(k, v) { this._attrs[k] = v; },
+    });
+    const textEls22 = [makeEl22('brand.name')];
+    const altEls22 = [makeEl22('brand.name')];
+    const doc22 = {
+      querySelectorAll: (sel) => ({ '[data-i18n]': textEls22, '[data-i18n-alt]': altEls22 }[sel] || []),
+      documentElement: { _attrs: {}, setAttribute(k, v) { this._attrs[k] = v; } },
+    };
+    tr.applyUiLang(doc22, 'en');
+    assert.strictEqual(textEls22[0].textContent, 'Chimera', '英文下品牌名文本应为 Chimera');
+    assert.strictEqual(altEls22[0]._attrs.alt, 'Chimera', '英文下品牌 logo alt 应为 Chimera');
+    tr.applyUiLang(doc22, 'zh');
+    assert.strictEqual(textEls22[0].textContent, '奇美拉', '切回中文品牌名文本应为 奇美拉');
+    assert.strictEqual(altEls22[0]._attrs.alt, '奇美拉', '切回中文品牌 logo alt 应为 奇美拉');
+    assert.doesNotThrow(() => tr.applyUiLang(null), 'doc 为 null 不应抛错');
+    ok('applyUiLang：品牌名文本 + alt 双语切换');
+  }
+  // 22c. index.html 静态接线：顶栏品牌名、首页大标题、三个品牌 logo alt 全走 brand.name；
+  // 登录标题早已是 data-i18n="login.title"（英文 Log in to Chimera），页脚跟版本号。
+  {
+    const html22 = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'index.html'), 'utf8');
+    assert.ok(html22.includes('<span class="brand-name" data-i18n="brand.name">'), '顶栏品牌名应走 data-i18n="brand.name"');
+    assert.ok(html22.includes('<h1 data-i18n="brand.name">'), '首页大标题应走 data-i18n="brand.name"');
+    assert.strictEqual((html22.match(/data-i18n-alt="brand\.name"/g) || []).length, 3, '三个品牌 logo img（顶栏/登录页/空会话）都应有 data-i18n-alt="brand.name"');
+    assert.ok(html22.includes('<h1 data-i18n="login.title">'), '登录标题应仍走 data-i18n="login.title"');
+    assert.ok(html22.includes('v0.3.17'), '页脚版本应为 v0.3.17');
+    ok('index.html：顶栏品牌名 + 首页大标题 + 3 处 logo alt 全走 brand.name');
+  }
+  // 22d. renderer.js 动态空会话：alt 走 ui('brand.name')，随渲染时语言；
+  // 数据内容不动：帖子正文里的“欢迎来到奇美拉”仍是数据，不进字典。
+  {
+    const rendererSrc22 = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'renderer.js'), 'utf8');
+    assert.ok(rendererSrc22.includes(`alt="' + ui('brand.name') + '"`), '动态空会话 logo alt 应走 ui(\'brand.name\')');
+    assert.ok(!rendererSrc22.includes('alt="奇美拉"'), 'renderer.js 不应再有写死的中文品牌 alt');
+    const pkg22 = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+    assert.strictEqual(pkg22.version, '0.3.17', 'package.json 版本应为 0.3.17');
+    ok('renderer.js 动态 alt + package.json 0.3.17；数据内容未动');
+  }
+
   console.log(`\nPASS: ${passed} 项全过`);
 }
 

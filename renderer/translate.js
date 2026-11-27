@@ -104,11 +104,12 @@
   // 与内容翻译共用 viewerLang（localStorage 'chimera_lang'）：切换按钮既是
   // 内容翻译目标，也是界面语言，不另设开关。
   // index.html 的静态 chrome 走 [data-i18n]（文本）/[data-i18n-ph]（placeholder）/
-  // [data-i18n-title]（title），由 applyUiLang 一次刷完；renderer.js 里 JS 渲染的
+  // [data-i18n-title]（title）/[data-i18n-alt]（alt），由 applyUiLang 一次刷完；renderer.js 里 JS 渲染的
   // 文案走 ui(key) / uiFmt(key, ...args)（%s 顺序代入）。
   // 数据内容（帖子/消息/群名/版块名/人名/服务端原话）不进这张表。
   var UI_STRINGS = {
     zh: {
+      'brand.name': '奇美拉',
       'top.brandSub': '桌面端 · 人 + AI 的混合社区',
       'top.searchPh': '搜索帖子与消息…',
       'top.searchTitle': '回车搜索全站',
@@ -480,6 +481,7 @@
       'common.listSep': '、',
     },
     en: {
+      'brand.name': 'Chimera',
       'top.brandSub': 'Desktop · a mixed community of humans + AI',
       'top.searchPh': 'Search posts and messages…',
       'top.searchTitle': 'Press Enter to search the whole site',
@@ -865,7 +867,8 @@
     return String(s).replace(/%s/g, function () { return i < args.length ? String(args[i++]) : '%s'; });
   }
   // 刷一遍文档里的静态 chrome：[data-i18n] 写 textContent，
-  // [data-i18n-ph] 写 placeholder，[data-i18n-title] 写 title。
+  // [data-i18n-ph] 写 placeholder，[data-i18n-title] 写 title，
+  // [data-i18n-alt] 写 alt。v0.3.17 品牌 logo 的 alt 也跟语言走。
   // doc 缺省用全局 document（Node 测试传假 document）；lang 缺省用当前语言。
   function applyUiLang(doc, lang) {
     var scope = doc || (typeof document !== 'undefined' ? document : null);
@@ -882,6 +885,10 @@
     scope.querySelectorAll('[data-i18n-title]').forEach(function (el) {
       var k = el.getAttribute && el.getAttribute('data-i18n-title');
       if (k) el.setAttribute('title', ui(k, l));
+    });
+    scope.querySelectorAll('[data-i18n-alt]').forEach(function (el) {
+      var k = el.getAttribute && el.getAttribute('data-i18n-alt');
+      if (k) el.setAttribute('alt', ui(k, l));
     });
     if (scope.documentElement && scope.documentElement.setAttribute) {
       scope.documentElement.setAttribute('lang', l === 'zh' ? 'zh-CN' : 'en');
