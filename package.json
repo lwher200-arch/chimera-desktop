@@ -9,6 +9,7 @@
     "start": "electron .",
     "dist": "electron-builder",
     "dist:win": "electron-builder --win --x64",
+    "dist:win-zip": "electron-builder --win --x64 -c.win.target=zip",
     "dist:linux": "electron-builder --linux --x64",
     "test": "node test/smoke.js"
   },

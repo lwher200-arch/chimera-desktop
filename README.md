@@ -3,13 +3,25 @@
 奇美拉社区的桌面终端：实时会话 / 群聊 / 好友客户端 + 内置公网轻节点，
 对接论坛 https://forum.coldhao.win 。
 
+## 下载（普通用户，不用编译）
+
+直接去 [Releases](https://github.com/lwher200-arch/chimera-desktop/releases)
+下载最新版，普通用户**不用**自己跑下面的构建命令：
+
+- **Windows**：下载 `Chimera-<版本号>-win.zip`（约 123 MB），解压后双击
+  里面的 `Chimera 桌面端.exe` 就能打开，不用安装。
+- **Linux**：下载 `Chimera-Desktop-<版本号>.AppImage`，给执行权限后双击运行。
+- 目前没有 NSIS 安装器（`Setup.exe`）：Windows 只有上面的免安装 zip，
+  不要去下载仓库源码 zip（源码包里没有 `dist/`，也打不出安装包）。
+- 打开后用论坛账号登录（用户名 + 密码）即可。
+
 > 视觉 v0.3.0（2026-11-23）：品牌视觉重做，取色自三动物渐变版品牌图标
 > （深蓝星空底 + 狮子金→橙红 + 山羊银→蓝紫 + 蛇绿→青 + 水晶星）。
 > 顶栏与登录页用上品牌图标（`renderer/assets/brand.png`，256px）；
 > 左侧改成图标轨导航，会话列表带头像与未读徽章，自己的消息靠右金色气泡、
 > 别人的消息靠左深色气泡，时间只显示 HH:MM，帖子改成卡片，节点面板改成
 > 状态卡片。只改视觉：所有 id、IPC 与数据逻辑不动。Electron 真机截图已验
-> （登录 / 会话 / 帖子 / 节点四面，见 `preview/`）。
+> （登录 / 会话 / 帖子 / 节点四面）。
 
 > 内核与终端的设计见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 > 论坛本身在另一个仓库；本应用只调论坛的公开 API，不 fork 论坛。
@@ -31,7 +43,8 @@
 npm install
 npm start            # 开发运行
 npm test             # 冒烟测试（调 live API + 本地 mock 节点启停）
-npm run dist:win     # 打 Windows NSIS 安装包到 dist/
+npm run dist:win     # 打 Windows NSIS 安装包到 dist/（须 Windows 机器）
+npm run dist:win-zip # 打 Windows 便携版 zip 到 dist/
 npm run dist:linux   # 打 Linux AppImage 到 dist/
 ```
 
@@ -64,7 +77,7 @@ WS/SSE）共用同一个 resolver：
 - **版本来源（清单）**：启动后 15 秒查一次，之后每 6 小时查一次，
   查的是 `{基地址}/desktop-update.json`（走 resolver，与 fallback
   共用同一解析；公网断了也能经尾网查到）。清单格式：
-  `{ "version": "0.2.1", "asarUrl": "https://github.com/lwher200-arch/chimera-desktop/releases/download/v0.2.1/app.asar", "sha256": "<hex>", "notes": "…" }`。
+  `{ "version": "<最新版本号>", "asarUrl": "https://github.com/lwher200-arch/chimera-desktop/releases/download/v<最新版本号>/app.asar", "sha256": "<hex>", "notes": "…" }`。
   清单不存在（404）= 还没发布过更新，静默当“无更新”。
 - **校验**：下载的 asar 的 sha256 必须与清单里的对上，对不上就丢弃、
   不换、不崩；下载失败也一样。换 asar 前把当前 asar 备份为
@@ -84,16 +97,21 @@ Release 当附件（`npm run dist:linux` 后从 `dist/linux-unpacked/resources/a
 
 ## 打包
 
-- **Windows 安装包（NSIS，推荐）**：必须在 Windows 机器上构建。
+- **Windows 便携版（zip，普通用户就用这个，也是目前唯一随 Release
+  发布的 Windows 包）**：解压即用，不用安装。
+  `npm run dist:win-zip`（即 `npx electron-builder --win --x64 -c.win.target=zip`），
+  产物 `dist/Chimera-<版本号>-win.zip`（版本号取 `package.json`），
+  解压后运行里面的 `Chimera 桌面端.exe`。
+- **Windows 安装包（NSIS，仅开发者在 Windows 上构建，目前不随
+  Release 发布）**：必须在 Windows 机器上构建。
   双击 `build-windows.bat`（或 `npm install` 后 `npm run dist:win`），
-  产物在 `dist/`（`Chimera 桌面端 Setup 0.1.0.exe`）。
-- **Windows 便携版（zip）**：解压即用，不用安装。
-  `npx electron-builder --win --x64 -c.win.target=zip`，
-  产物 `dist/Chimera 桌面端-0.1.0-win.zip`，解压后运行里面的
-  `Chimera 桌面端.exe`。
+  产物在 `dist/`，文件名形如 `Chimera 桌面端 Setup <版本号>.exe`
+  （版本号取 `package.json`）。
 - 注意：Linux 下交叉编译 NSIS 安装包需要 32 位 wine，本仓库的
   沙箱环境跑不了 32 位 wine，所以 NSIS 包只能在 Windows 上打；
-  zip 可以在 Linux 下打。
+  zip 可以在 Linux 下打。发版时 Windows 只发 zip，不要把本地
+  `dist/` 里残留的旧版 stub `Setup.exe`（如 186 KB 的 0.1.0 残件）
+  当安装器分发。
 
 ## 节点开关
 
